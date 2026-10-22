@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="440" viewBox="0 0 1000 440" role="img" aria-label="Rec Cue! の録り方: 画面は GPU のまま H.264 に、マイクと PC の音声は 1 つの時計で混ぜて AAC に、どちらも 1 本の MP4 へ">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B7587"/>
+    </marker>
+    <style>
+      text { font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Segoe UI", "Yu Gothic UI", "Meiryo", "Noto Sans JP", sans-serif; }
+      .t { font-size: 15px; font-weight: 600; fill: #E6EAF2; }
+      .s { font-size: 12.5px; fill: #9AA4B2; }
+      .k { font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+      .box { fill: #1B202A; stroke: #2B3240; stroke-width: 1; }
+      .line { stroke: #6B7587; stroke-width: 1.6; fill: none; }
+      .note { font-size: 13.5px; fill: #C9D1DD; }
+      .hi { font-size: 13.5px; font-weight: 600; fill: #38BDF8; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1000" height="440" rx="18" fill="#13161C"/>
+
+  <text x="24" y="40" class="k" fill="#38BDF8">VIDEO — GPU のまま</text>
+  <text x="24" y="182" class="k" fill="#3B82F6">AUDIO — 1 つの時計</text>
+
+  <!-- video lane -->
+  <rect class="box" x="24" y="56" width="104" height="74" rx="10"/>
+  <rect x="24" y="56" width="4" height="74" rx="2" fill="#38BDF8"/>
+  <text x="40" y="88" class="t">画面</text>
+  <text x="40" y="110" class="s">デスクトップ</text>
+
+  <rect class="box" x="152" y="56" width="230" height="74" rx="10"/>
+  <rect x="152" y="56" width="4" height="74" rx="2" fill="#38BDF8"/>
+  <text x="168" y="88" class="t">Desktop Duplication</text>
+  <text x="168" y="110" class="s">変わった時だけ受け取る</text>
+
+  <rect class="box" x="406" y="56" width="180" height="74" rx="10"/>
+  <rect x="406" y="56" width="4" height="74" rx="2" fill="#38BDF8"/>
+  <text x="422" y="88" class="t">色の変換</text>
+  <text x="422" y="110" class="s">BGRA → NV12 (GPU)</text>
+
+  <rect class="box" x="610" y="56" width="180" height="74" rx="10"/>
+  <rect x="610" y="56" width="4" height="74" rx="2" fill="#38BDF8"/>
+  <text x="626" y="88" class="t">H.264 にする</text>
+  <text x="626" y="110" class="s">GPU の動画専用回路</text>
+
+  <path class="line" d="M128 93 H148" marker-end="url(#arrow)"/>
+  <path class="line" d="M382 93 H402" marker-end="url(#arrow)"/>
+  <path class="line" d="M586 93 H606" marker-end="url(#arrow)"/>
+  <path class="line" d="M790 93 H810" marker-end="url(#arrow)"/>
+
+  <!-- audio lane -->
+  <rect class="box" x="24" y="198" width="104" height="56" rx="10"/>
+  <rect x="24" y="198" width="4" height="56" rx="2" fill="#3B82F6"/>
+  <text x="40" y="222" class="t">マイク</text>
+  <text x="40" y="242" class="s">自分の声</text>
+
+  <rect class="box" x="24" y="266" width="104" height="56" rx="10"/>
+  <rect x="24" y="266" width="4" height="56" rx="2" fill="#3B82F6"/>
+  <text x="40" y="290" class="t">PC の音声</text>
+  <text x="40" y="310" class="s">相手の声</text>
+
+  <rect class="box" x="152" y="198" width="434" height="124" rx="10"/>
+  <rect x="152" y="198" width="4" height="124" rx="2" fill="#3B82F6"/>
+  <text x="168" y="232" class="t">WASAPI で受け取り、並べて混ぜる</text>
+  <text x="168" y="256" class="s">音と映像を、同じ 1 つの時計 (QPC) の上に置く</text>
+  <text x="168" y="278" class="s">→ 長く録っても、音と映像がずれにくい</text>
+  <text x="168" y="300" class="s">PC の音声は、出力先の機器を自動で選ぶ</text>
+
+  <rect class="box" x="610" y="198" width="180" height="124" rx="10"/>
+  <rect x="610" y="198" width="4" height="124" rx="2" fill="#3B82F6"/>
+  <text x="626" y="232" class="t">AAC にする</text>
+  <text x="626" y="256" class="s">50 ms ごとに</text>
+  <text x="626" y="278" class="s">48 kHz・ステレオ</text>
+
+  <path class="line" d="M128 226 H148" marker-end="url(#arrow)"/>
+  <path class="line" d="M128 294 H148" marker-end="url(#arrow)"/>
+  <path class="line" d="M586 260 H606" marker-end="url(#arrow)"/>
+  <path class="line" d="M790 260 H810" marker-end="url(#arrow)"/>
+
+  <!-- output -->
+  <rect x="814" y="56" width="162" height="266" rx="12" fill="#1F1820" stroke="#E11D48" stroke-width="1.4"/>
+  <text x="830" y="92" class="t">1 本の MP4</text>
+  <text x="830" y="116" class="s">fragmented MP4</text>
+  <text x="830" y="150" class="s">最初から本番の</text>
+  <text x="830" y="170" class="s">ファイルに書く</text>
+  <text x="830" y="204" class="s">0.4 秒ごとに</text>
+  <text x="830" y="224" class="s">書き足す</text>
+  <text x="830" y="258" class="s">止めたら仕上げる</text>
+  <text x="830" y="278" class="s">だけ (約 10 ms)</text>
+
+  <!-- notes -->
+  <rect x="24" y="352" width="310" height="64" rx="10" fill="#171B23" stroke="#2B3240"/>
+  <text x="40" y="378" class="note">画像は CPU を通らない</text>
+  <text x="40" y="401" class="hi">→ 録画中の CPU は 1〜2%</text>
+  <rect x="345" y="352" width="310" height="64" rx="10" fill="#171B23" stroke="#2B3240"/>
+  <text x="361" y="378" class="note">待機中はタイマーも止める</text>
+  <text x="361" y="401" class="hi">→ 待機中の CPU は 0</text>
+  <rect x="666" y="352" width="310" height="64" rx="10" fill="#171B23" stroke="#2B3240"/>
+  <text x="682" y="378" class="note">受け渡しは同じ量を使い回す</text>
+  <text x="682" y="401" class="hi">→ 録画中のメモリは横ばい</text>
+</svg>

@@ -1,0 +1,35 @@
+#include <winver.h>
+
+1 ICON "app.ico"
+1 24 "app.manifest"
+
+// SD guide pictures (ui_draw.h kResGuideIdle / kResGuideRec): standing with the booklet / taking notes
+101 RCDATA "guide-idle.png"
+102 RCDATA "guide-rec.png"
+// しおり's lines (shiori.h kResLines)
+103 RCDATA "shiori-lines.txt"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 0,3,3,0
+PRODUCTVERSION 0,3,3,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041104B0"
+    BEGIN
+      VALUE "CompanyName", "keigoly"
+      VALUE "FileDescription", "Rec Cue! lightweight screen and audio recorder"
+      VALUE "FileVersion", "0.3.3"
+      VALUE "InternalName", "rec-cue"
+      VALUE "OriginalFilename", "rec-cue.exe"
+      VALUE "ProductName", "Rec Cue!"
+      VALUE "ProductVersion", "0.3.3"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0411, 1200
+  END
+END
