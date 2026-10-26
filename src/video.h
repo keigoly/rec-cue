@@ -14,8 +14,11 @@ struct MonitorInfo {
     std::wstring adapter;     // Intel(R) Iris(R) Xe Graphics
     RECT rect{};
     bool primary = false;
+    std::wstring name;        // the monitor's own name (DELL U2720Q); often empty for a built-in panel (names only)
+    bool internal = false;    // a laptop's built-in panel (names only)
 };
-std::vector<MonitorInfo> listMonitors();
+// names: also look up each monitor's name in the display configuration (about a millisecond more).
+std::vector<MonitorInfo> listMonitors(bool names = false);
 
 class VideoSource {
 public:

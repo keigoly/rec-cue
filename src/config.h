@@ -11,6 +11,7 @@ struct Config {
     int fps = 15;
     int videoKbps = 2000;
     int audioKbps = 128;
+    std::wstring audioFormat = L"mp3";   // recording audio only: mp3 | wav | m4a (the screen is always MP4)
     int monitor = 0;                     // 0 = primary
     std::wstring mic = L"auto";          // auto | default | communications | none | part of a device name
     std::wstring system = L"auto";       // auto | default | communications | none | names separated by |

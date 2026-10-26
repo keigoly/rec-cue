@@ -19,7 +19,7 @@
 
 namespace rc {
 
-constexpr const char* kVersion = "0.3.3";
+constexpr const char* kVersion = "0.4.1";
 
 // Minimal intrusive COM pointer (no WRL dependency).
 template <class T>

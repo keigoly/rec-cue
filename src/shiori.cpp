@@ -12,7 +12,7 @@ namespace {
 const char* const kSceneNames[] = {
     "start",    "back",  "talk",   "tip",      "check",       "check_mic", "check_sys", "check_quiet", "check_end", "starting",
     "rec",      "rec_on", "audio", "audio_on", "shot",        "shot_idle", "warn_screen", "warn_sys",  "warn_mic",  "warn_nosys",
-    "recover",  "saving", "saved", "fail_start", "fail_save", "fail_shot", "pin_on",    "pin_off"};
+    "recover",  "saving", "saved", "fail_start", "fail_save", "fail_shot", "pin_on",    "pin_off",   "pause",     "resume"};
 static_assert(sizeof(kSceneNames) / sizeof(kSceneNames[0]) == static_cast<size_t>(Scene::Count), "a name per scene");
 
 enum : uint16_t {

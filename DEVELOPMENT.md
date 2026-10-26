@@ -11,7 +11,7 @@ C++17 / Win32 の単体 exe (ランタイムのインストールは不要)。Ma
 - ビルドは Mac (llvm-mingw のクロスビルド・§5)。試験は Windows 10 / 11 の PC で、合成の映像と音を使う (§5)。
 - 公開用のリポジトリ (https://github.com/keigoly/rec-cue) は、非公開の開発用のリポジトリから書き出して更新している。
 
-## 3. 現在の問題点(2026-10-23 時点)
+## 3. 現在の問題点(2026-10-26 時点)
 
 - **実際の会議・通話での録画は未試験。** 相手の声 (ループバック) は仮想ケーブルに流した試験音と、既定のスピーカーで鳴った音で確認済み。実会議で相手の声が入るかは、最初の実会議の `sessions/*.json` の `audio.sources` (sys の `peak_db` と `silent_pct`) で確かめる。
 - **ヘッドセットをつないだ状態は未試験。** 仮想ミキサーがヘッドセットを占有している場合は「音が来ているミキサーの出力」を選ぶ設計だが、実機では確かめていない。録画中にマイクが外れたら 5 秒ごとに選び直す (`audio.mic_replaced`)。
@@ -25,6 +25,9 @@ C++17 / Win32 の単体 exe (ランタイムのインストールは不要)。Ma
 - タスクバーの点滅と画面左上の丸は実機で目視済み (10-22)。点滅はタスクバーの「バッジを表示する」設定が切れていると出ない。ログの `ui.taskbar` / `ui.overlay` / `ui.dot` で出したかが分かる。
 - 待機中のメモリは working set 約 60 MB (private 約 40 MB)。GPU で描くため最初の版 (19 MB) より多い。待機中の CPU は 0 (100 ms の刻みは録画中・確認中・保存中だけ動く)。
 - 録画ボタンを押してから録り始めるまで約 1.3 秒かかる (マイクの自動選択 0.5 秒 + エンコーダーの準備 0.7 秒)。その間の画面と音は入らない。
+- **一時停止 (0.4.0)**: 止めた間を映像と音声の時間軸から同じだけ抜く (`docs/DESIGN.md` 4.7)。合成の試験 (§5 の 6) では、音のずれが一時停止なしと同じで、つなぎ目の隙間は 1 コマ以下。一時停止中も音声の機器は開いたまま (メーターは動く)。実際の会議での長い一時停止は未確認。
+- **録音の形式 (0.4.1)**: MP3 (既定・Windows に入っている MP3 エンコーダー)・WAV (Media Foundation を通さず自前で書き、見出しの長さを 1 秒ごとに書き直す・4 GB で自動停止)・M4A。録画は MP4 のまま。2026-10-26 に実機で 3 つとも確認済み。WAV の 4 GB での自動停止は、実際の長さでは未確認 (5 時間 47 分かかるため)。
+- **タスクバーのサムネイルのボタン (0.4.0)**: `ITaskbarList3::ThumbBarAddButtons`。窓を開かない試験では確かめられない (ログの `ui.thumbbar` / `ui.thumb` / `ui.thumbicons`)。2026-10-26 に実機で 録画・一時停止・再開・停止・録音 を確認済み。明るいタスクバーの絵とエクスプローラーの再起動後の足し直しは未確認。
 
 ## 4. バグ修正時の手順(一気に直さない)
 
@@ -60,14 +63,16 @@ scripts/build.sh            # → build/rec-cue.exe (警告 0 で通ること)
 1. 自己試験: `--record --seconds 8 --test-pattern --mic none --system none --verify --out %USERPROFILE%\.rec-cue\test\self.mp4` → 121 コマ・コマ落ち 0・`verify.ok`
 2. 相手の声の経路: `--record --seconds 8 --test-pattern --mic none --system "CABLE Input" --test-tone "CABLE Input" --verify --out ...\tone.mp4` → `tone.offset_ms` が 3 つとも同じくらいの値 (2026-10-20 は 113〜117 ms) で揃うこと (仮想ケーブル VB-CABLE が要る)
 3. 連続: `--record --seconds 60 --test-pattern --mic none --system none --verify ...` → `stats` 行の `private_mb` が増え続けないこと
-4. 録音だけ (0.3.0〜): `--record --seconds 8 --audio-only --mic none --system "CABLE Input" --test-tone "CABLE Input" --verify --out ...\audio.m4a` → `audio_only:true`・`verify` の streams が audio だけ・`tone.offset_ms` が揃うこと
+4. 録音だけ (0.3.0〜): `--record --seconds 8 --audio-only --mic none --system "CABLE Input" --test-tone "CABLE Input" --verify --out ...\audio.mp3` → `audio_only:true`・`audio_file`・`verify` の streams が audio だけ・`tone.offset_ms` が揃うこと。形式は `--out` の拡張子 (`.mp3` / `.wav` / `.m4a`) か `--audio-format` で選ぶ (0.4.1〜)。3 つとも回す (2026-10-26: MP3 120〜124 ms・WAV 112〜120 ms・M4A 110〜112 ms。MP3 は仕組み上の遅れの分だけ大きい)。WAV の大きさは 1 秒 192,000 バイト + 44
 5. スクショ (0.3.0〜): `--shot ...\shot.png` → `capture_ms` / `save_ms` / `bytes`。実画面が写るので、試験の PNG は試験の後に消す。窓が写らないことは `--shot-selftest` (`in_shot_without_window` が 0・`in_plain_shot` が 9216 前後。画面の左上に 96 px の四角が 0.2 秒ほど出る)。
+6. 一時停止 (0.4.0〜): 2 の試験に `--pause-at 3 --pause-for 2` (始めて 3 秒で止め、2 秒後に再開) → `paused_s` 2.0・`cli_pause`・4 秒目の試験音は止めた間なので抜けて 2 つ・`tone.offset_ms` が一時停止なしと同じくらい・`verify` の `max_gap_s` が映像 0.067 (1 コマ)・音声 0.021 (AAC 1 枠) のまま (つなぎ目に穴がない)。録音だけ (4) でも同じ。
+7. 落ちても残るか (0.4.1〜): 試験用の版 (`rec-cue-next.exe`) で `--record --seconds 30 --audio-only ... --out ...\crash.wav` (と `.mp3`) を始め、7 秒ほどで `rec-cue-next` のプロセスだけを止める (利用者の `rec-cue` には触れない) → `--verify-file` で ok・WAV は止めた 1 秒ほど前まで (2026-10-26: 6.0 秒)・MP3 は止めた所まで (6.7 秒)。
 
 - 試験のファイルは合成の映像 (`--test-pattern`) と合成の音 (`--mic none`・`--test-tone`) だけで作る。実画面・実マイクを録った試験のファイルは試験の後に消す。
 - 試験の録画も `sessions\<sid>.json` に残る。利用者の録画だけを拾うときは `path` が `\.rec-cue\test\` のものを除く。
-- 画面の見た目は `--ui-snapshot %USERPROFILE%\.rec-cue\test\ui.png [--dpi 192] [--at 2026-10-22T14:00]` → `ui-idle / hover / check / rec / shot / warn / audio / opening / saved / talk.png` の 10 枚 (opening は録音の側が開く途中、talk はしおりにマウスを乗せてヒントを話すところ)。ウィンドウも音声機器も開かず、音量・機器名・フォルダーは見本なので、PC の中身は写らない。台詞は毎回同じ乱数で選び、`--at` でその日時の台詞 (時間帯・曜日・季節) にする。`--dpi 192` は 2 倍の絵。
-- README の画像: `--ui-snapshot <dir>\pub.png --dpi 192 --at 2026-10-22T14:00` の 10 枚を Mac に持ってきて `uv run --with pillow python3 tools/make_readme_images.py <dir> docs/images` (アイコン・見出しの絵・各場面)。仕組みの図は `docs/images/how-it-works.svg` (手で書いた SVG)。
-- しおりの台詞を変えたら `--lines-check` → 台詞の数 (場面ごと)・読み込みの ms・増えたメモリ・1 回選ぶ µs と、実際の字幅 (DirectWrite) で吹き出し (330.4 DIP) に入らない台詞 (`over`) と最も長い 12 本 (`widest`)。差し込みは最も長い値 (12 時間 59 分・9999.9 MB・Ctrl+Alt+Shift+F12) で測る。2026-10-23 (0.3.2): 1,109 本・0.95 ms・180 KB・0.44 µs・入らない台詞 0・最長 298.9 DIP。
+- 画面の見た目は `--ui-snapshot %USERPROFILE%\.rec-cue\test\ui.png [--dpi 192] [--at 2026-10-22T14:00]` → `ui-idle / hover / check / rec / shot / warn / audio / opening / saved / talk / paused / audio-paused.png` の 12 枚 (opening は録音の側が開く途中、talk はしおりにマウスを乗せてヒントを話すところ、paused は録画の一時停止中) と、タスクバーのサムネイルのボタンの絵 `ui-thumb-record / audio / pause / resume / stop[-light].png` (64 px・暗い / 明るいタスクバー)。ウィンドウも音声機器も開かず、音量・機器名・フォルダー・画面の並びは見本 (マイクと PC の音声は「自動」に固定) なので、PC の中身は写らない。台詞は毎回同じ乱数で選び、`--at` でその日時の台詞 (時間帯・曜日・季節) にする。`--dpi 192` は 2 倍の絵。
+- README の画像: `--ui-snapshot <dir>\pub.png --dpi 192 --at 2026-10-22T14:00` の画像を Mac に持ってきて `uv run --with pillow python3 tools/make_readme_images.py <dir> docs/images` (アイコン・見出しの絵・各場面)。仕組みの図は `docs/images/how-it-works.svg` (手で書いた SVG)。
+- しおりの台詞を変えたら `--lines-check` → 台詞の数 (場面ごと)・読み込みの ms・増えたメモリ・1 回選ぶ µs と、実際の字幅 (DirectWrite) で吹き出し (330.4 DIP) に入らない台詞 (`over`) と最も長い 12 本 (`widest`)。差し込みは最も長い値 (12 時間 59 分・9999.9 MB・Ctrl+Alt+Shift+F12) で測る。2026-10-23 (0.3.2): 1,109 本・0.95 ms・180 KB・0.44 µs・入らない台詞 0・最長 298.9 DIP。2026-10-26 (0.4.0): 1,142 本 (場面 30・pause / resume を追加)・1.0 ms・172 KB・0.44 µs・入らない台詞 0。0.4.1: 1,144 本 (.m4a と言っていた 5 本を形式によらない言い方に・形式のヒント 2 本)。
 
 ### アイコンと案内役の絵 (Mac)
 - アイコン: `uv run --with pillow python3 tools/make_icon.py res/icon-src.png res/app.ico --preview <確認用.png>` (角丸の四角・16〜256 px の 10 サイズ)。原画 `res/icon-src.png` は NovelAI V5 の S-L1P1 (seed 26102201) を 512 px にしたもの。

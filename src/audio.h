@@ -70,6 +70,10 @@ public:
     void stopAt(int64_t qpcStop);
     void stopNow();
     bool running() const { return running_.load(); }
+    // The sound from qpc on is left out of the output until resumeAt (a paused recording); what follows is moved
+    // back by the time left out, so the file continues without a gap. The meters keep running meanwhile.
+    void pauseAt(int64_t qpc);
+    void resumeAt(int64_t qpc);
 
     Meter mic, sys;
     std::wstring micName() const;
@@ -77,6 +81,7 @@ public:
     std::string windowJson();    // per-source levels since the previous call (for the 10 s stats line)
     std::string summaryJson();   // whole-session numbers per source
     uint64_t mixedFrames() const { return static_cast<uint64_t>(mixed_.load()); }
+    uint64_t cutFrames() const { return static_cast<uint64_t>(cut_.load()); }   // left out while paused
     uint64_t clipped() const { return clipped_.load(); }
 
 private:
@@ -89,7 +94,7 @@ private:
     void reapDead();
     bool chooseAutoMic(IMMDeviceEnumerator* en, AudioDevice* out, std::vector<std::string>* notes);
     void mix(uint32_t n);
-    void finishMeters(bool isMic, float peak, double ss, uint32_t n);
+    void finishMeters(bool isMic, float peak, double ss, uint32_t n, bool paused);
 
     Config cfg_;
     std::vector<std::unique_ptr<AudioCapture>> src_;
@@ -103,7 +108,11 @@ private:
     std::atomic<int64_t> stopFrames_{-1};
     std::atomic<bool> stopNow_{false}, running_{false};
     std::atomic<int64_t> mixed_{0};
+    std::atomic<int64_t> cut_{0};   // frames left out so far (paused)
     std::atomic<uint64_t> clipped_{0};
+    std::mutex cutMu_;
+    std::vector<std::pair<int64_t, int64_t>> cuts_;   // paused [from, to) in timeline frames; to = INT64_MAX while open
+    std::vector<std::pair<int64_t, int64_t>> cutNow_;   // the ones touching the chunk being mixed (engine thread)
     int64_t latencyFrames_ = 7200;
     std::vector<float> acc_;
     std::vector<int16_t> out_;

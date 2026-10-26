@@ -15,9 +15,12 @@
 namespace rc {
 
 // Clickable parts of the window. Drawing and hit-testing share the same rectangles. Guide: しおり or her bubble.
-enum class Part { None, Record, Audio, Pin, Shot, Gear, Mic, Sys, Check, Open, Guide };
+// Pause / AudioPause: ❚❚ (▶ while paused) beside the stop button of the screen / the audio-only side.
+// Screen: the row that picks the monitor to record (its field or its small map).
+// AudioFormat: the file of a recording of sound alone (MP3 / WAV / M4A), a chip beside 録音 while nothing records.
+enum class Part { None, Record, Audio, Pin, Shot, Gear, Mic, Sys, Check, Open, Guide, Pause, AudioPause, Screen, AudioFormat };
 
-constexpr float kClientW = 480, kClientH = 304;   // client area in DIPs
+constexpr float kClientW = 480, kClientH = 340;   // client area in DIPs
 
 D2D1_RECT_F partRect(Part p);
 Part hitTest(float x, float y);   // DIPs; the label column of a channel row opens its menu too
@@ -41,6 +44,14 @@ struct ChannelView {
     double hold = -90;     // peak hold
 };
 
+// The monitor to record: the setting as the field shows it, and the desktop's layout for the small map beside it.
+struct ScreenView {
+    std::wstring choice;            // 1: メイン 1920×1080
+    bool active = false;            // the screen is being recorded (or starting / saving)
+    std::vector<RECT> monitors;     // desktop coordinates, numbered 1.. in this order
+    int selected = 0;               // the one recorded
+};
+
 struct UiModel {
     enum class Phase { Idle, Checking, Starting, Recording, Saving };
     enum class Tone { Normal, Good, Warn, Bad };
@@ -51,6 +62,7 @@ struct UiModel {
     std::wstring status;
     Tone tone = Tone::Normal;
     ChannelView mic, sys;
+    ScreenView screen;
     std::wstring pathLabel = L"保存先";
     std::wstring path;
     Part hot = Part::None, pressed = Part::None, focus = Part::None;
@@ -60,12 +72,17 @@ struct UiModel {
     int shots = 0;            // screenshots in the current recording
     bool shotFlash = false;   // a screenshot was just taken
     bool alert = false;       // the recording needs attention (amber deck); a passing notice never sets it
+    bool paused = false;      // the recording is paused (amber PAUSE chip and band, the time stands still)
+    std::wstring audioFormat = L"MP3";   // what recording audio only makes (the chip beside 録音)
     std::wstring recHotkey, shotHotkey, audioHotkey;   // shortcut hints (empty when not registered)
     std::wstring comment;     // what しおり says under the buttons
     Tone commentTone = Tone::Normal;
 };
 
 bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p);
+
+// The pictures of the buttons under the taskbar thumbnail (ThumbBar in indicator.h).
+enum class ThumbGlyph { Record, Audio, Pause, Resume, Stop };
 
 class UiPainter {
 public:
@@ -75,6 +92,10 @@ public:
     void dropTarget();                               // DPI change / device lost: recreated on the next paint
     // Renders the client area to a PNG without a window (for checking the look; no screen content).
     HRESULT snapshot(const std::wstring& png, UINT dpi, const UiModel& m);
+    // A px x px icon for a taskbar thumbnail button, record red and audio blue as in the window, the others white
+    // (dark on the light taskbar), and the same as a PNG for checking the look (--ui-snapshot).
+    HICON thumbIcon(ThumbGlyph g, int px, bool light);
+    HRESULT thumbPng(ThumbGlyph g, int px, bool light, const std::wstring& png);
     // The room for しおり's line in her bubble and the width a line takes there (DIPs; --lines-check).
     float commentRoom() const;
     float commentWidth(const std::wstring& s) const;
@@ -88,12 +109,15 @@ private:
     void deckPanel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, int tint);
     void drawRecord(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
     void drawAudio(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
+    void drawPause(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part p);
     void drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float x, bool audio);
     void drawHint(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float right);
     void drawStatus(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, const D2D1_RECT_F& r);
     void drawChannel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m, Part part,
                      const ChannelView& c, const wchar_t* label, wchar_t icon, float y);
     void drawMeter(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const ChannelView& c, float y);
+    void drawScreen(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m);
+    void drawScreenMap(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const ScreenView& s, const D2D1_RECT_F& box);
     void drawPath(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m);
     void drawButton(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part p, wchar_t icon,
                     const std::wstring& label, bool toggled);
@@ -101,10 +125,13 @@ private:
     void drawComment(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
     void drawSideLabel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, const wchar_t* title,
                        const wchar_t* sub, const std::wstring& key, bool trailing);
+    void drawFormatChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
     void panel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, float radius, UINT32 fill,
                UINT32 border, UINT32 edge);
     void focusRing(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, float radius);
     void loadGuides(ID2D1RenderTarget* rt, UINT dpi);
+    HRESULT renderThumb(ThumbGlyph g, int px, bool light, Com<IWICBitmap>* out);
+    HRESULT writePng(IWICBitmap* bmp, const std::wstring& png) const;
     void text(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const std::wstring& s, IDWriteTextFormat* f,
               const D2D1_RECT_F& r, float spacing = 0, float* width = nullptr);
     float textWidth(const std::wstring& s, IDWriteTextFormat* f) const;
@@ -118,7 +145,7 @@ private:
     Com<IWICImagingFactory> wic_;
     Com<ID2D1HwndRenderTarget> target_;
     Com<IDWriteTextFormat> brand_, timer_, chip_, chipJp_, hint_, status_, label_, field_, db_, dbJp_, path_, badge_,
-        button_, icon_, iconLarge_, iconSmall_, chevron_, counter_, title_, sub_, name_;
+        button_, icon_, iconLarge_, iconSmall_, chevron_, counter_, title_, sub_, name_, thumbMic_;
     Com<ID2D1Bitmap> guide_[2];   // idle / recording, scaled to the DPI of the target they belong to
     D2D1_SIZE_F guideDip_[2] = {};
     UINT guideDpi_ = 0;

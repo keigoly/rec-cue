@@ -10,8 +10,8 @@
 103 RCDATA "shiori-lines.txt"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,3,3,0
-PRODUCTVERSION 0,3,3,0
+FILEVERSION 0,4,1,0
+PRODUCTVERSION 0,4,1,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -21,11 +21,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "keigoly"
       VALUE "FileDescription", "Rec Cue! lightweight screen and audio recorder"
-      VALUE "FileVersion", "0.3.3"
+      VALUE "FileVersion", "0.4.1"
       VALUE "InternalName", "rec-cue"
       VALUE "OriginalFilename", "rec-cue.exe"
       VALUE "ProductName", "Rec Cue!"
-      VALUE "ProductVersion", "0.3.3"
+      VALUE "ProductVersion", "0.4.1"
     END
   END
   BLOCK "VarFileInfo"

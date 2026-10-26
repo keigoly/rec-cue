@@ -5,8 +5,9 @@
 //   rec-cue.exe --lines-check [--json-out <file>]   しおり's lines: counts, load / pick time, any that would not fit
 //   rec-cue.exe --quit [--json-out <file>]   closes a running window unless it is recording (deploy)
 //   rec-cue.exe --list-devices --json-out <file>
-//   rec-cue.exe --record --seconds 15 [--test-pattern | --audio-only] [--out <mp4|m4a>] [--json-out <file>] [--verify]
-//               [--fps N] [--container fmp4|mp4] [--mic <spec>] [--system <spec>]
+//   rec-cue.exe --record --seconds 15 [--test-pattern | --audio-only] [--out <mp4|mp3|wav|m4a>] [--json-out <file>] [--verify]
+//               [--fps N] [--container fmp4|mp4] [--mic <spec>] [--system <spec>] [--audio-format mp3|wav|m4a]
+//               [--pause-at S --pause-for S]   pauses S seconds after the start (wall clock) and resumes after the other S
 //   rec-cue.exe --verify-file <mp4> --json-out <file>
 //   rec-cue.exe --shot <png> [--json-out <file>]        screenshot of the recorded monitor (timing check)
 //   rec-cue.exe --shot-selftest [--json-out <file>]     shows a small test square for a moment and checks that a
@@ -48,9 +49,9 @@ namespace {
 struct Args {
     bool listDevices = false, record = false, verify = false, version = false, testPattern = false, probe = false, quit = false,
          shotTest = false, audioOnly = false, linesCheck = false, any = false;
-    double seconds = 0;
+    double seconds = 0, pauseAt = 0, pauseFor = 0;
     int fps = 0, dpi = 0;
-    std::wstring out, jsonOut, verifyFile, container, mic, system, testTone, snapshot, shot, at;
+    std::wstring out, jsonOut, verifyFile, container, mic, system, testTone, snapshot, shot, at, audioFormat;
     std::string error;
 };
 
@@ -77,6 +78,8 @@ Args parseArgs() {
         else if (s == L"--lines-check") a.linesCheck = true;
         else if (s == L"--shot") val(a.shot);
         else if (s == L"--seconds") { std::wstring v; val(v); a.seconds = _wtof(v.c_str()); }
+        else if (s == L"--pause-at") { std::wstring v; val(v); a.pauseAt = _wtof(v.c_str()); }
+        else if (s == L"--pause-for") { std::wstring v; val(v); a.pauseFor = _wtof(v.c_str()); }
         else if (s == L"--fps") { std::wstring v; val(v); a.fps = _wtoi(v.c_str()); }
         else if (s == L"--out") val(a.out);
         else if (s == L"--json-out") val(a.jsonOut);
@@ -84,6 +87,7 @@ Args parseArgs() {
         else if (s == L"--container") val(a.container);
         else if (s == L"--mic") val(a.mic);
         else if (s == L"--system") val(a.system);
+        else if (s == L"--audio-format") val(a.audioFormat);
         else if (s == L"--test-tone") val(a.testTone);
         else if (s == L"--ui-snapshot") val(a.snapshot);
         else if (s == L"--dpi") { std::wstring v; val(v); a.dpi = _wtoi(v.c_str()); }
@@ -132,10 +136,12 @@ std::string encodersJson() {
 std::string devicesJson() {
     std::string s = "{\"version\":" + json(std::string(kVersion)) + ",\"monitors\":[";
     bool first = true;
-    for (auto& m : listMonitors()) {
-        s += fmt("%s{\"index\":%d,\"device\":%s,\"adapter\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld,\"primary\":%s}",
+    for (auto& m : listMonitors(true)) {
+        s += fmt("%s{\"index\":%d,\"device\":%s,\"adapter\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld,\"primary\":%s,"
+                 "\"name\":%s,\"internal\":%s}",
                  first ? "" : ",", m.index, json(m.device).c_str(), json(m.adapter).c_str(), m.rect.left, m.rect.top,
-                 m.rect.right - m.rect.left, m.rect.bottom - m.rect.top, m.primary ? "true" : "false");
+                 m.rect.right - m.rect.left, m.rect.bottom - m.rect.top, m.primary ? "true" : "false",
+                 json(m.name).c_str(), m.internal ? "true" : "false");
         first = false;
     }
     for (int r = 0; r < 2; ++r) {
@@ -336,7 +342,8 @@ int runCli(const Args& a) {
     }
     if (!a.verifyFile.empty() && !a.record) {
         const std::wstring f = lower(a.verifyFile);
-        std::string v = verifyFile(a.verifyFile, f.size() > 4 && f.substr(f.size() - 4) == L".m4a");
+        const std::wstring ext = f.size() > 4 ? f.substr(f.size() - 4) : L"";
+        std::string v = verifyFile(a.verifyFile, ext == L".m4a" || ext == L".mp3" || ext == L".wav");
         writeText(a.jsonOut, v);
         return v.find("\"ok\":true") != std::string::npos ? 0 : 5;
     }
@@ -348,6 +355,7 @@ int runCli(const Args& a) {
         if (!a.container.empty()) c.container = lower(a.container);
         if (!a.mic.empty()) c.mic = a.mic;
         if (!a.system.empty()) c.system = a.system;
+        if (!a.audioFormat.empty()) c.audioFormat = lower(a.audioFormat);
         RecordOptions o;
         o.testPattern = a.testPattern;
         o.audioOnly = a.audioOnly;
@@ -365,12 +373,27 @@ int runCli(const Args& a) {
             std::string e;
             if (!tone.start(a.testTone, r.qpcStart(), toneAt, 0.3, &e)) Log::event("tone", false, -1, e);
         }
-        while (!r.loopEnded()) Sleep(50);
+        double pausedAt = -1, resumedAt = -1;   // wall clock seconds since the start (--pause-at)
+        auto wall = [&r] { return qpcMs(qpcNow() - r.qpcStart()) / 1000.0; };
+        while (!r.loopEnded()) {
+            Sleep(10);
+            if (a.pauseAt <= 0) continue;
+            if (pausedAt < 0 && wall() >= a.pauseAt && r.pause()) pausedAt = wall();
+            if (pausedAt >= 0 && resumedAt < 0 && wall() >= pausedAt + a.pauseFor && r.resume()) resumedAt = wall();
+        }
         tone.stop();
         r.stop();
         std::string s = r.summary();
+        // where the bursts should be in the file: a burst inside the pause is left out, later ones move back
+        std::vector<double> toneIn;
+        for (double x : toneAt) {
+            if (pausedAt < 0 || x < pausedAt) toneIn.push_back(x);
+            else if (resumedAt >= 0 && x >= resumedAt) toneIn.push_back(x - (resumedAt - pausedAt));
+        }
+        if (pausedAt >= 0 && !s.empty() && s.back() == '}')
+            s = s.substr(0, s.size() - 1) + fmt(",\"cli_pause\":{\"at_s\":%.3f,\"resumed_s\":%.3f}}", pausedAt, resumedAt);
         if (!a.testTone.empty() && !s.empty() && s.back() == '}')
-            s = s.substr(0, s.size() - 1) + ",\"tone\":" + analyzeTones(r.path(), toneAt) + ",\"tone_device\":" + json(tone.device) + "}";
+            s = s.substr(0, s.size() - 1) + ",\"tone\":" + analyzeTones(r.path(), toneIn) + ",\"tone_device\":" + json(tone.device) + "}";
         int code = r.lastOk() ? 0 : 4;
         if (a.verify && r.lastOk()) {
             std::string v = verifyFile(r.path(), r.audioOnly());
@@ -389,7 +412,7 @@ int runCli(const Args& a) {
 
 constexpr UINT WM_APP_STOPPED = WM_APP + 1;
 constexpr UINT WM_APP_SHOT = WM_APP + 2;   // the PNG of a screenshot has been written
-constexpr UINT_PTR kTimer = 1, kTimerNotice = 2, kTimerFlash = 3, kTimerSplit = 4, kTimerSay = 5;
+constexpr UINT_PTR kTimer = 1, kTimerNotice = 2, kTimerFlash = 3, kTimerSplit = 4, kTimerSay = 5, kTimerResume = 6;
 constexpr int kHotkey = 1, kHotkeyShot = 2, kHotkeyAudio = 3;
 constexpr UINT kMenuBase = 1000;
 constexpr UINT kSysTopmost = 0x0010, kSysShot = 0x0020;   // system menu items (Windows uses the low 4 bits)
@@ -412,8 +435,12 @@ struct App {
     std::thread stopper;
     std::vector<Choice> micItems, sysItems;
     int micSel = 0, sysSel = 0;
+    std::vector<MonitorInfo> monitors;   // for the screen row (refreshed when the menu opens and the displays change)
+    int recMonitor = 0;                  // the monitor of the recording being started, made or saved
     bool hotkeyOn = false, shotHotkeyOn = false, audioHotkeyOn = false, topmost = false;
     Indicators ind;             // taskbar dot and screen-corner dot while recording
+    ThumbBar thumb;             // record / audio / pause / stop under the taskbar thumbnail
+    bool thumbIcons = false;    // ... and whether its icons have been drawn
     UINT taskbarMsg = 0;        // "TaskbarButtonCreated"
     HICON iconBig = nullptr, iconSmall = nullptr;   // the window's icons at its monitor's DPI
     HWND tip = nullptr;         // tooltips of the icon-only tools and the guide
@@ -703,6 +730,37 @@ void refreshPath() {
     g.path = g.cfg.resolvedOutDir();
 }
 
+void refreshMonitors() {
+    Stopwatch sw;
+    g.monitors = listMonitors(true);
+    Log::event("ui.monitors", !g.monitors.empty(), sw.ms(), fmt("count=%zu selected=%d", g.monitors.size(), g.cfg.monitor));
+}
+
+// "1: メイン 1920×1080" in the field, numbered as in the small map; where it sits is told from the main screen.
+// The menu adds the monitor's own name: "2: 右 2560×1440 — DELL U2720Q".
+std::wstring screenLabel(size_t i, bool full) {
+    const MonitorInfo& mi = g.monitors[i];
+    std::wstring where = L"メイン";
+    if (!mi.primary && !g.monitors.empty()) {
+        const RECT& p = g.monitors[0].rect;   // the main screen comes first
+        const long dx = (mi.rect.left + mi.rect.right - p.left - p.right) / 2, dy = (mi.rect.top + mi.rect.bottom - p.top - p.bottom) / 2;
+        where = (dx < 0 ? -dx : dx) >= (dy < 0 ? -dy : dy) ? (dx >= 0 ? L"右" : L"左") : (dy >= 0 ? L"下" : L"上");
+    }
+    std::wstring s = std::to_wstring(i + 1) + L": " + where + L" " + std::to_wstring(mi.rect.right - mi.rect.left) + L"×" +
+                     std::to_wstring(mi.rect.bottom - mi.rect.top);
+    const std::wstring name = !mi.name.empty() ? mi.name : mi.internal ? L"内蔵ディスプレイ" : L"";
+    if (full && !name.empty()) s += L" — " + name;
+    return s;
+}
+
+// The monitor recorded (while a recording runs, the one it started with, even if the settings file changed since),
+// or the configured one; the main one when that is not there (the recording falls back the same way).
+int screenSetting() { return g.recording || g.starting || g.stopping ? g.recMonitor : g.cfg.monitor; }
+int screenIndex() {
+    const int m = screenSetting();
+    return m >= 0 && m < static_cast<int>(g.monitors.size()) ? m : 0;
+}
+
 // The 100 ms tick runs only while something moves (recording, level check, saving); idle costs nothing.
 void syncTimer() {
     const bool want = g.recording || g.checking || g.stopping;
@@ -717,6 +775,8 @@ float pulse() {   // one slow breath every 2 s for the recording lamp
     const double t = qpcMs(qpcNow()) / 1000.0;
     return static_cast<float>(0.5 + 0.5 * std::cos(t * 3.14159265358979));
 }
+
+const wchar_t* audioFormatLabel(AudioFile f) { return f == AudioFile::Mp3 ? L"MP3" : f == AudioFile::Wav ? L"WAV" : L"M4A"; }
 
 UiModel model() {
     UiModel m;
@@ -744,6 +804,13 @@ UiModel model() {
         c.warn = k == 1 && g.recording && c.active && mt.silentMs.load() > 60000;   // the other party may be missing
     }
     m.audioOnly = g.recAudio && (g.recording || g.starting || g.stopping);
+    m.screen.active = (g.recording || g.starting || g.stopping) && !g.recAudio;
+    m.screen.selected = screenIndex();
+    for (auto& mi : g.monitors) m.screen.monitors.push_back(mi.rect);
+    if (g.monitors.empty()) m.screen.choice = L"メインの画面";
+    else if (screenSetting() != m.screen.selected)
+        m.screen.choice = L"画面 " + std::to_wstring(screenSetting() + 1) + L" が見つかりません → " + screenLabel(0, false);
+    else m.screen.choice = screenLabel(static_cast<size_t>(m.screen.selected), false);
     m.split = g.split;
     m.hot = g.hot;
     m.pressed = g.pressed;
@@ -754,6 +821,8 @@ UiModel model() {
     m.shots = g.shots;
     m.shotFlash = qpcNow() < g.flashUntil;
     m.alert = g.alert && g.recording;
+    m.paused = g.recording && g.rec.paused();
+    m.audioFormat = audioFormatLabel(audioFileOf(g.cfg.audioFormat));
     m.recHotkey = g.hotkeyOn ? g.cfg.hotkey : L"";
     m.shotHotkey = g.shotHotkeyOn ? g.cfg.shotHotkey : L"";
     m.audioHotkey = g.audioHotkeyOn ? g.cfg.audioHotkey : L"";
@@ -783,14 +852,15 @@ void takeShot(const char* via) {
     if (g.shooting) return;   // the previous PNG is still being written
     if (!g.recording && !g.starting && !g.stopping) g.cfg = loadConfig();   // picks up a changed monitor / folder
     const int seq = ++g.shotSeq;
+    const int monitor = screenSetting();   // the recorded one while recording
     ShotImage img;
     ShotInfo info;
     std::string err;
     Stopwatch sw;
-    const bool ok = captureMonitor(g.cfg.monitor, g.hwnd, &img, &info, &err);
+    const bool ok = captureMonitor(monitor, g.hwnd, &img, &info, &err);
     Log::event("shot.capture", ok, sw.ms(),
                fmt("shot=%d via=%s monitor=%d %ux%u excluded=%s hidden=%s flush_ms=%.1f blt_ms=%.1f recording=%s%s%s", seq, via,
-                   g.cfg.monitor, img.w, img.h, info.excluded ? "true" : "false", info.hidden ? "true" : "false",
+                   monitor, img.w, img.h, info.excluded ? "true" : "false", info.hidden ? "true" : "false",
                    info.flushMs, info.bltMs, g.recording ? "true" : "false", err.empty() ? "" : " error=", err.c_str()));
     if (!ok) {
         notice(L"スクショを撮れませんでした (" + wide(err) + L")", UiModel::Tone::Bad);   // in her bubble while idle
@@ -893,15 +963,55 @@ void startCheck() {
     syncTimer();
 }
 
-// audio: microphone + PC audio only (.m4a), shown in blue; otherwise the screen as well (.mp4), shown in red.
+// ---- the buttons under the taskbar thumbnail (indicator.h): what they show follows the recording
+
+// The taskbar's own theme (Settings > Personalization > Colors > "Windows mode"); the button glyphs follow it.
+bool lightTaskbar() {
+    DWORD v = 0, n = sizeof(v);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                        L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &v, &n) == ERROR_SUCCESS &&
+           v != 0;
+}
+
+void makeThumbIcons() {
+    const int px = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());   // the size the taskbar draws them at
+    const bool light = lightTaskbar();
+    const ThumbGlyph glyphs[ThumbBar::kIcons] = {ThumbGlyph::Record, ThumbGlyph::Audio, ThumbGlyph::Pause,
+                                                 ThumbGlyph::Resume, ThumbGlyph::Stop};
+    HICON icons[ThumbBar::kIcons];
+    int made = 0;
+    Stopwatch sw;
+    for (int i = 0; i < ThumbBar::kIcons; ++i) made += (icons[i] = g.painter.thumbIcon(glyphs[i], px, light)) != nullptr;
+    g.thumb.setIcons(icons);
+    g.thumbIcons = true;
+    Log::event("ui.thumbicons", made == ThumbBar::kIcons, sw.ms(), fmt("%dpx light=%s made=%d", px, light ? "true" : "false", made));
+}
+
+ThumbView thumbView() {
+    ThumbView v;
+    v.recording = g.recording;   // also while it is being saved
+    v.busy = g.starting || g.stopping;
+    v.paused = g.recording && g.rec.paused();
+    v.audioOnly = g.recAudio;
+    if (g.hotkeyOn) v.recKey = g.cfg.hotkey;
+    if (g.audioHotkeyOn) v.audioKey = g.cfg.audioHotkey;
+    v.audioFile = audioFormatLabel(audioFileOf(g.cfg.audioFormat));
+    return v;
+}
+
+void syncThumb() { g.thumb.show(thumbView()); }
+
+// audio: microphone + PC audio only (MP3 / WAV / M4A), shown in blue; otherwise the screen as well (.mp4), in red.
 void startRecording(bool audio) {
     if (g.recording || g.stopping || g.starting) return;
     stopCheck();
     std::vector<std::string> warn;
     g.cfg = loadConfig(&warn);
     for (auto& w : warn) Log::event("config", false, -1, w);
+    g.recMonitor = g.cfg.monitor;
     g.starting = true;
     g.recAudio = audio;
+    syncThumb();
     dropNotice();
     g.passingUntil = 0;
     g.warnScene = Scene::Count;
@@ -919,6 +1029,7 @@ void startRecording(bool audio) {
     g.starting = false;
     if (!ok) {
         g.recAudio = false;
+        syncThumb();
         SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
         SetWindowTextW(g.hwnd, kTitle);
         setStatus(L"開始できませんでした: " + err, UiModel::Tone::Bad);
@@ -937,6 +1048,7 @@ void startRecording(bool audio) {
     say(audio ? Scene::Audio : Scene::Rec);
     // audio only has no recorded monitor: its corner dot goes on the main one
     g.ind.start(g.hwnd, audio ? RecKind::Audio : RecKind::Screen, audio ? 0 : g.cfg.monitor);
+    syncThumb();
     animateSplit(audio ? -1.f : 1.f);   // now that it records (the start above holds this thread for a moment)
     syncTimer();
 }
@@ -945,6 +1057,7 @@ void stopRecording() {
     if (!g.recording || g.stopping) return;
     g.stopping = true;
     g.ind.stop();   // nothing is captured any more; only the file is being finished
+    syncThumb();
     setStatus(L"ファイルを仕上げています…");
     say(Scene::Saving);
     syncTimer();
@@ -985,6 +1098,7 @@ void onStopped() {
     say(g.rec.lastOk() ? Scene::Saved : Scene::FailSave, c);
     animateSplit(0);   // back to halves
     g.recAudio = false;
+    syncThumb();
     g.pathLabel = L"保存先";
     g.path = p;
 }
@@ -998,11 +1112,14 @@ void tick() {
         g.timer = b;
         using T = UiModel::Tone;
         const bool audio = g.rec.audioOnly();
+        const bool held = g.rec.paused();   // nothing is recorded, so there is nothing to warn about
         const std::wstring what = audio ? L"録音中" : L"録画中";
         std::wstring st = what + L" — ■ を押すと停止して保存します";
         T tone = T::Normal;
         Scene warn = Scene::Count;
-        if (!audio && !g.rec.videoCapturing()) {
+        if (held) {
+            st = L"一時停止中 — ▶ で再開、■ で停止して保存します";
+        } else if (!audio && !g.rec.videoCapturing()) {
             st = L"画面を取り込めていません (ロック中など)";
             tone = T::Warn;
             warn = Scene::WarnScreen;
@@ -1028,7 +1145,7 @@ void tick() {
             g.tone = tone;
         }
         // しおり: which warning as soon as it has lasted 2 s, a word when it is over, every 10 minutes and milestones
-        if (warn != g.warnScene && (warn == Scene::Count || t >= 2)) {
+        if (!held && warn != g.warnScene && (warn == Scene::Count || t >= 2)) {
             say(warn != Scene::Count ? warn : Scene::Recover);
             g.warnScene = warn;
         }
@@ -1089,6 +1206,18 @@ std::wstring menuText(const std::wstring& s) {   // '&' would underline the next
 
 bool enabled(Part p) { return partEnabled(phase(), g.recAudio, p); }
 
+// Opens `menu` under the field of `part` and returns the command picked (0: none).
+UINT menuUnder(HMENU menu, Part part) {
+    const D2D1_RECT_F f = partRect(part);
+    RECT ex{S(static_cast<int>(f.left)), S(static_cast<int>(f.top)), S(static_cast<int>(f.right)), S(static_cast<int>(f.bottom))};
+    MapWindowPoints(g.hwnd, nullptr, reinterpret_cast<POINT*>(&ex), 2);
+    TPMPARAMS tp{sizeof(tp), ex};
+    g.pressed = Part::None;
+    invalidate();
+    return static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_VERTICAL,
+                                              ex.left, ex.bottom + S(2), g.hwnd, &tp));
+}
+
 void chooseDevice(bool render) {
     const Part part = render ? Part::Sys : Part::Mic;
     if (!enabled(part)) return;
@@ -1103,14 +1232,7 @@ void chooseDevice(bool render) {
         AppendMenuW(menu, MF_STRING | (static_cast<int>(i) == sel ? MF_CHECKED : MF_UNCHECKED), kMenuBase + i,
                     menuText(items[i].label).c_str());
     }
-    const D2D1_RECT_F f = partRect(part);
-    RECT ex{S(static_cast<int>(f.left)), S(static_cast<int>(f.top)), S(static_cast<int>(f.right)), S(static_cast<int>(f.bottom))};
-    MapWindowPoints(g.hwnd, nullptr, reinterpret_cast<POINT*>(&ex), 2);
-    TPMPARAMS tp{sizeof(tp), ex};
-    g.pressed = Part::None;
-    invalidate();
-    const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_VERTICAL,
-                                                        ex.left, ex.bottom + S(2), g.hwnd, &tp));
+    const UINT cmd = menuUnder(menu, part);
     DestroyMenu(menu);
     if (!IsWindow(g.hwnd)) return;
     if (!enabled(part)) {   // recording started (hotkey) while the menu was open: keep the setting
@@ -1127,6 +1249,79 @@ void chooseDevice(bool render) {
     invalidate();
 }
 
+// The monitor to record (the screenshots and the corner dot follow it). Saved as monitor=N, which the next recording
+// reads; a number no longer there is listed too, greyed, as the recording then uses the main screen.
+void chooseScreen() {
+    if (!enabled(Part::Screen)) return;
+    g.cfg = loadConfig();
+    refreshMonitors();   // a display plugged in since
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    const int sel = screenIndex();
+    const bool missing = g.cfg.monitor != sel;
+    for (size_t i = 0; i < g.monitors.size(); ++i)
+        AppendMenuW(menu, MF_STRING | (!missing && static_cast<int>(i) == sel ? MF_CHECKED : MF_UNCHECKED), kMenuBase + i,
+                    menuText(screenLabel(i, true)).c_str());
+    if (missing) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | MF_CHECKED | MF_GRAYED, 0,
+                    (L"(設定ファイルの指定) 画面 " + std::to_wstring(g.cfg.monitor + 1) + L" — 見つからないので 1 で録ります").c_str());
+    }
+    const UINT cmd = menuUnder(menu, Part::Screen);
+    DestroyMenu(menu);
+    if (!IsWindow(g.hwnd)) return;
+    if (!enabled(Part::Screen)) {   // recording started (hotkey, taskbar) while the menu was open: keep the setting
+        invalidate();
+        return;
+    }
+    if (cmd >= kMenuBase && cmd < kMenuBase + g.monitors.size()) {
+        const size_t i = cmd - kMenuBase;
+        const bool ok = saveConfigValue(L"monitor", std::to_wstring(i));
+        g.cfg = loadConfig();
+        const RECT& r = g.monitors[i].rect;
+        Log::event("ui.monitor", ok, -1,
+                   fmt("monitor=%zu %s %ldx%ld at (%ld,%ld)", i, u8(g.monitors[i].device).c_str(), r.right - r.left,
+                       r.bottom - r.top, r.left, r.top));
+    }
+    invalidate();
+}
+
+// What a recording of sound alone makes. Saved as audio_format=..., used from the next recording on.
+void chooseAudioFormat() {
+    if (!enabled(Part::AudioFormat)) return;
+    g.cfg = loadConfig();
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    wchar_t mp3[128], m4a[128];
+    const double mbPerHour = g.cfg.audioKbps * 0.45;   // kbps -> MB per hour
+    swprintf(mp3, 128, L"MP3 — 小さく、どこでも再生できる (%d kbps・1 時間でおよそ %.0f MB)", g.cfg.audioKbps, mbPerHour);
+    swprintf(m4a, 128, L"M4A (AAC) — 同じ大きさなら MP3 より音がよい (%d kbps・1 時間でおよそ %.0f MB)", g.cfg.audioKbps,
+             mbPerHour);
+    const std::pair<const wchar_t*, std::wstring> items[] = {
+        {L"mp3", mp3},
+        {L"wav", L"WAV — 圧縮しない (1 時間でおよそ 690 MB・5 時間 47 分まで)"},
+        {L"m4a", m4a}};
+    const AudioFile cur = audioFileOf(g.cfg.audioFormat);
+    for (size_t i = 0; i < 3; ++i)
+        AppendMenuW(menu, MF_STRING | (audioFileOf(items[i].first) == cur ? MF_CHECKED : MF_UNCHECKED), kMenuBase + i,
+                    items[i].second.c_str());
+    const UINT cmd = menuUnder(menu, Part::AudioFormat);
+    DestroyMenu(menu);
+    if (!IsWindow(g.hwnd)) return;
+    if (!enabled(Part::AudioFormat)) {   // recording started while the menu was open: keep the setting
+        invalidate();
+        return;
+    }
+    if (cmd >= kMenuBase && cmd < kMenuBase + 3) {
+        const wchar_t* v = items[cmd - kMenuBase].first;
+        const bool ok = saveConfigValue(L"audio_format", v);
+        g.cfg = loadConfig();
+        Log::event("ui.audio_format", ok, -1, u8(v));
+        syncThumb();   // its tip names the format
+    }
+    invalidate();
+}
+
 // The audio button starts audio only, or stops an audio-only recording; ● / ■ stops whichever recording runs.
 void toggleAudio() {
     if (g.recording && g.recAudio) stopRecording();
@@ -1137,6 +1332,41 @@ void toggleAudio() {
 void toggleRecord() {
     if (g.recording && !g.recAudio) stopRecording();
     else if (!g.recording) startRecording(false);
+}
+
+// ❚❚ beside ■ (either side): nothing is recorded until ▶, and the file then goes on where it stopped. The title
+// keeps 録画中 / 録音中 so that --quit (deploy) still leaves a paused recording alone.
+void togglePause() {
+    if (!g.recording || g.stopping) return;
+    const bool resume = g.rec.paused();
+    if (!(resume ? g.rec.resume() : g.rec.pause())) return;
+    g.ind.setPaused(!resume);
+    g.alert = false;
+    g.warnScene = Scene::Count;   // a warning that still holds after the pause is said again
+    if (g.noticeActive) dropNotice();
+    const bool audio = g.recAudio;
+    SetWindowTextW(g.hwnd, resume ? (audio ? L"● 録音中 - Rec Cue!" : L"● 録画中 - Rec Cue!")
+                                  : (audio ? L"● 録音中 (一時停止) - Rec Cue!" : L"● 録画中 (一時停止) - Rec Cue!"));
+    syncThumb();
+    say(resume ? Scene::Resume : Scene::Pause);
+    tick();   // the status line and the time now
+}
+
+// A button under the taskbar thumbnail: the same as the window's own buttons.
+void onThumb(UINT id) {
+    Log::event("ui.thumb", true, -1,
+               fmt("button=%s recording=%s paused=%s", id == kThumbRecord ? "record" : id == kThumbAudio ? "audio"
+                                                       : id == kThumbPause ? "pause"
+                                                                           : "stop",
+                   g.recording ? "true" : "false", g.recording && g.rec.paused() ? "true" : "false"));
+    const bool idle = !g.recording && !g.starting && !g.stopping;
+    if (id == kThumbRecord && idle) startRecording(false);
+    if (id == kThumbAudio && idle) startRecording(true);
+    // ▶ closes the preview, which fades out for a moment: resume once it is gone, so the taskbar is not recorded
+    // (starting has its own second or so before the first frame)
+    if (id == kThumbPause && g.recording && g.rec.paused()) SetTimer(g.hwnd, kTimerResume, 300, nullptr);
+    else if (id == kThumbPause) togglePause();
+    if (id == kThumbStop) stopRecording();
 }
 
 void openConfig() {
@@ -1213,7 +1443,7 @@ void showSettingsMenu() {
         case kSite: openUrl(g.cfg.siteUrl); break;
         case kAbout: {
             const std::wstring s = L"Rec Cue! " + wide(std::string(kVersion)) +
-                                   L"\n\n画面とマイクと PC の音声を 1 本の MP4 に、音声だけなら .m4a に録る軽い録画アプリです。"
+                                   L"\n\n画面とマイクと PC の音声を 1 本の MP4 に、音声だけなら MP3・WAV・M4A に録る軽い録画アプリです。"
                                    L"\n\n案内役: 湊 しおり (みなと しおり)\n設定とログ: " + appDir();
             MessageBoxW(g.hwnd, s.c_str(), L"Rec Cue! について", MB_ICONINFORMATION | MB_OK);
             break;
@@ -1228,7 +1458,9 @@ void talk() {
     if (g.starting || g.stopping) return;
     g.passingUntil = 0;
     SayContext c = sayContext();
-    if (g.recording && g.warnScene != Scene::Count) {
+    if (g.recording && g.rec.paused()) {
+        say(Scene::Pause, c);
+    } else if (g.recording && g.warnScene != Scene::Count) {
         say(g.warnScene, c);
     } else if (g.recording) {
         c.sec = g.rec.elapsedSec();
@@ -1249,6 +1481,8 @@ void activate(Part p) {
         case Part::Gear: showSettingsMenu(); break;
         case Part::Mic: chooseDevice(false); break;
         case Part::Sys: chooseDevice(true); break;
+        case Part::Screen: chooseScreen(); break;
+        case Part::AudioFormat: chooseAudioFormat(); break;
         case Part::Check:
             if (g.checking) {
                 stopCheck();
@@ -1267,14 +1501,17 @@ void activate(Part p) {
         case Part::Pin: setTopmost(!g.topmost, true); break;
         case Part::Shot: takeShot("button"); break;
         case Part::Guide: talk(); break;
+        case Part::Pause:
+        case Part::AudioPause: togglePause(); break;
         case Part::None: break;
     }
 }
 
 void moveFocus(int dir) {
-    static const Part order[] = {Part::Record, Part::Audio, Part::Pin,   Part::Shot, Part::Gear,
-                                 Part::Mic,    Part::Sys,   Part::Check, Part::Open};
-    constexpr int n = 9;
+    static const Part order[] = {Part::Record, Part::Pause, Part::AudioPause, Part::Audio, Part::AudioFormat,
+                                 Part::Pin,    Part::Shot,  Part::Gear,       Part::Screen, Part::Mic,
+                                 Part::Sys,    Part::Check, Part::Open};
+    constexpr int n = 13;
     int i = 0;
     while (i < n && order[i] != g.focus) ++i;
     for (int step = 0; step < n; ++step) {
@@ -1327,7 +1564,8 @@ void addSystemMenu() {
 
 // ---- tooltips: the tools that are only an icon, and the guide's name
 constexpr UINT_PTR kTipGuide = 100;
-const Part kTipParts[] = {Part::Record, Part::Audio, Part::Pin, Part::Shot, Part::Gear};
+const Part kTipParts[] = {Part::Record, Part::Audio, Part::Pin, Part::Shot, Part::Gear, Part::Pause, Part::AudioPause,
+                          Part::AudioFormat};
 
 RECT tipRect(UINT_PTR id) {
     const D2D1_RECT_F f = id == kTipGuide ? guideRect() : partRect(static_cast<Part>(id));
@@ -1346,6 +1584,17 @@ std::wstring tipText(UINT_PTR id) {
         case Part::Pin: return g.topmost ? L"最前面の固定をやめる" : L"最前面に固定する";
         case Part::Shot: return L"スクショ (" + shot + L") — Rec Cue! の窓は写りません";
         case Part::Gear: return L"設定・ログ・ショートカットキー・リンク";
+        case Part::AudioFormat:   // only while nothing records (it is not shown otherwise)
+            if (!enabled(Part::AudioFormat)) return L"";
+            return std::wstring(L"録音の形式: ") + audioFormatLabel(audioFileOf(g.cfg.audioFormat)) +
+                   L" — クリックで MP3・WAV・M4A から選べます (録画はいつも MP4)";
+        case Part::Pause:
+        case Part::AudioPause: {   // no tip where the button is not shown (an empty text shows nothing)
+            if (!enabled(static_cast<Part>(id))) return L"";
+            const wchar_t* what = g.recAudio ? L"録音" : L"録画";
+            return g.rec.paused() ? std::wstring(what) + L"を再開 (止めていた間は入りません)"
+                                  : std::wstring(what) + L"を一時停止 (■ で停止して保存)";
+        }
         default: return L"";
     }
 }
@@ -1395,6 +1644,8 @@ void moveTooltips() {   // after a DPI change
 // dpi: 0 = the system's (192 = the README's 2x pictures). at: "2026-10-22T14:00" picks the lines of that time.
 int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     g.cfg = loadConfig();
+    g.cfg.mic = g.cfg.system = L"auto";   // the menus' labels for other settings would name this PC's devices
+    g.cfg.audioFormat = L"mp3";
     std::vector<std::string> problems;
     g.lines.load(GetModuleHandleW(nullptr), &problems);
     for (auto& q : problems) Log::event("lines", false, -1, q);
@@ -1412,6 +1663,14 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     fillItems(false);
     fillItems(true);
     refreshPath();
+    // sample monitors too (the main screen and a larger one to its right), so the map shows nothing of this PC
+    MonitorInfo mainScreen, rightScreen;
+    mainScreen.rect = {0, 0, 1920, 1080};
+    mainScreen.primary = mainScreen.internal = true;
+    rightScreen.index = 1;
+    rightScreen.rect = {1920, -180, 4480, 1260};
+    g.monitors = {mainScreen, rightScreen};
+    g.cfg.monitor = 0;
     std::wstring base = path;
     if (base.size() > 4 && lower(base.substr(base.size() - 4)) == L".png") base.resize(base.size() - 4);
     UiPainter p;
@@ -1468,6 +1727,7 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     rec.pathLabel = L"録画中";
     rec.path = dir + L"\\" + name;
     rec.split = 1;
+    rec.screen.active = true;
     line(rec, Scene::Rec, c0);
     shot(L"rec", rec);
     UiModel shotm = rec;   // pinned, just after the third screenshot
@@ -1500,7 +1760,7 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     audio.timer = L"00:03:21";
     audio.status = L"録音中 — ■ を押すと停止して保存します";
     audio.pathLabel = L"録音中";
-    audio.path = dir + L"\\" + g.cfg.namePrefix + L" 2026-10-22 200105.m4a";
+    audio.path = dir + L"\\" + g.cfg.namePrefix + L" 2026-10-22 200105.mp3";
     shot(L"audio", audio);
     UiModel opening = audio;   // the audio side half way open (the animation after audio recording starts)
     opening.split = -0.5f;
@@ -1520,15 +1780,49 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     talk.hot = Part::Guide;
     line(talk, Scene::Tip, c0);
     shot(L"talk", talk);
+    UiModel paused = rec;   // paused: ▶ beside ■, the PAUSE chip and band in amber, the time stands still
+    paused.paused = true;
+    paused.pulse = 0.6f;
+    paused.status = L"一時停止中 — ▶ で再開、■ で停止して保存します";
+    line(paused, Scene::Pause, c0);
+    shot(L"paused", paused);
+    UiModel apaused = audio;
+    apaused.paused = true;
+    apaused.pulse = 0.6f;
+    apaused.status = paused.status;
+    line(apaused, Scene::Pause, ca);
+    shot(L"audio-paused", apaused);
+    // the buttons under the taskbar thumbnail, 4x the 16 px they are at 100%, for the dark and the light taskbar
+    const std::pair<ThumbGlyph, const wchar_t*> glyphs[] = {{ThumbGlyph::Record, L"record"}, {ThumbGlyph::Audio, L"audio"},
+                                                            {ThumbGlyph::Pause, L"pause"},   {ThumbGlyph::Resume, L"resume"},
+                                                            {ThumbGlyph::Stop, L"stop"}};
+    for (const bool light : {false, true})
+        for (const auto& gl : glyphs) {
+            const std::wstring name = std::wstring(L"thumb-") + gl.second + (light ? L"-light" : L"");
+            const HRESULT hr = p.thumbPng(gl.first, 64, light, base + L"-" + name + L".png");
+            Log::event("ui.snapshot", SUCCEEDED(hr), -1, u8(name), hr);
+            if (FAILED(hr)) ++fails;
+        }
     return fails ? 1 : 0;
 }
 
 LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == g.taskbarMsg && msg) {   // the taskbar button exists (again, after an Explorer restart)
         g.ind.taskbarReady(h);
+        if (!g.thumbIcons) makeThumbIcons();
+        g.thumb.taskbarReady(h, thumbView());
         return 0;
     }
     switch (msg) {
+        case WM_COMMAND:
+            if (HIWORD(wp) == THBN_CLICKED) {   // a button under the taskbar thumbnail
+                onThumb(LOWORD(wp));
+                return 0;
+            }
+            break;
+        case WM_SETTINGCHANGE:   // light / dark taskbar: the thumbnail buttons are drawn again in its colours
+            if (lp && lstrcmpiW(reinterpret_cast<LPCWSTR>(lp), L"ImmersiveColorSet") == 0 && g.thumbIcons) makeThumbIcons();
+            break;
         case WM_CREATE:
             g.hwnd = h;
             g.dpi = GetDpiForWindow(h);
@@ -1537,6 +1831,7 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             resizeToClient();
             fillItems(false);
             fillItems(true);
+            refreshMonitors();
             refreshPath();
             registerHotkey();
             addSystemMenu();
@@ -1634,7 +1929,7 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (wp == VK_SPACE || wp == VK_RETURN ||
-                ((wp == VK_DOWN || wp == VK_F4) && (g.focus == Part::Mic || g.focus == Part::Sys))) {
+                ((wp == VK_DOWN || wp == VK_F4) && (g.focus == Part::Mic || g.focus == Part::Sys || g.focus == Part::Screen))) {
                 g.showFocus = true;
                 activate(g.focus);
                 return 0;
@@ -1663,6 +1958,10 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 KillTimer(h, kTimerFlash);
                 invalidate();
             }
+            if (wp == kTimerResume) {   // ▶ under the taskbar thumbnail, 0.3 s ago (still paused and not stopping)
+                KillTimer(h, kTimerResume);
+                if (g.recording && !g.stopping && g.rec.paused()) togglePause();
+            }
             return 0;
         case WM_APP_STOPPED:
             onStopped();
@@ -1681,6 +1980,10 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             invalidate();
             return 0;
         }
+        case WM_DISPLAYCHANGE:   // a monitor came or went, or a resolution changed: the screen row and its map follow
+            refreshMonitors();
+            invalidate();
+            break;
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE) {
                 g.inactiveSince = qpcNow();
@@ -1725,7 +2028,9 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(h, kTimerFlash);
             KillTimer(h, kTimerSplit);
             KillTimer(h, kTimerSay);
+            KillTimer(h, kTimerResume);
             g.ind.shutdown();
+            g.thumb.shutdown();
             g.painter.dropTarget();
             if (g.hotkeyOn) UnregisterHotKey(h, kHotkey);
             if (g.shotHotkeyOn) UnregisterHotKey(h, kHotkeyShot);

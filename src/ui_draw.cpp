@@ -37,7 +37,7 @@ constexpr UINT32 kToastBg = 0x112A3A, kToastBorder = 0x0284C7;
 
 D2D1_COLOR_F C(UINT32 rgb, float a = 1.f) { return D2D1::ColorF(rgb, a); }
 
-// ---- layout (DIPs, client area 480 x 272) -----------------------------------
+// ---- layout (DIPs, client area 480 x 340) -----------------------------------
 constexpr float kL = 14, kR = 466;
 constexpr D2D1_RECT_F kBrandBox{kL, 8, 200, 36};
 constexpr D2D1_RECT_F kPinBox{370, 8, 398, 36};    // header tools: icons only
@@ -54,20 +54,29 @@ constexpr D2D1_RECT_F kTimerBox{88, 47, 222, 79};
 constexpr float kChipX = 224, kChipY = 53, kChipH = 20;
 constexpr float kStatusTop = 81, kStatusBottom = 103;
 constexpr float kAudTimeRight = kAud.x - kAudR - 12;   // the audio time ends just before its button
-constexpr float kMicY = 120, kSysY = 156, kRowH = 28;
+// once a recording runs, ❚❚ sits beside its stop button and the time moves over to make room
+constexpr D2D1_POINT_2F kPause{100, 76};
+constexpr float kPauseR = 17;
+constexpr D2D1_POINT_2F kAudPause{391, 76};
+constexpr float kAudPauseR = 15;
+constexpr D2D1_RECT_F kRecTimerBox{126, 47, 260, 79};
+constexpr float kRecChipX = 262;
+constexpr float kAudTimeRightLive = kAudPause.x - kAudPauseR - 10;
+constexpr D2D1_RECT_F kFormatBox{316, 51, 364, 69};   // MP3 ▾ on the title line of the audio side, left of 録音
+constexpr float kScreenY = 120, kMicY = 156, kSysY = 192, kRowH = 28;   // 画面 / マイク / PC の音声
 constexpr float kFieldL = 98, kFieldR = 294, kMeterL = 302, kMeterR = 414, kDbL = 418;
-constexpr D2D1_RECT_F kPathBox{kL, 194, 400, 220};
-constexpr D2D1_RECT_F kCheckBox{kL, 230, 204, 260};
-constexpr D2D1_RECT_F kOpenBox{210, 230, 400, 260};
-constexpr D2D1_RECT_F kGuideBox{402, 204, 478, 302};   // the SD guide stands here, feet on the bottom edge
+constexpr D2D1_RECT_F kPathBox{kL, 230, 400, 256};
+constexpr D2D1_RECT_F kCheckBox{kL, 266, 204, 296};
+constexpr D2D1_RECT_F kOpenBox{210, 266, 400, 296};
+constexpr D2D1_RECT_F kGuideBox{402, 240, 478, 338};   // the SD guide stands here, feet on the bottom edge
 constexpr float kGuideH = 96;
-constexpr D2D1_RECT_F kBubble{kL, 268, 394, 296};      // what しおり says, under the buttons, pointing at her
+constexpr D2D1_RECT_F kBubble{kL, 304, 394, 332};      // what しおり says, under the buttons, pointing at her
 
 // Segoe Fluent Icons / Segoe MDL2 Assets
 constexpr wchar_t kIconMic = 0xE720, kIconSpeakers = 0xE767, kIconPulse = 0xE9D9, kIconStop = 0xE71A,
                   kIconFolderOpen = 0xE838, kIconSettings = 0xE713, kIconChevron = 0xE70D, kIconFolder = 0xE8B7,
                   kIconPin = 0xE718, kIconPinFill = 0xE842, kIconCamera = 0xE722, kIconWarn = 0xE7BA,
-                  kIconCheck = 0xE73E;
+                  kIconCheck = 0xE73E, kIconMonitor = 0xE7F4;
 
 D2D1_RECT_F inset(const D2D1_RECT_F& r, float d) { return {r.left + d, r.top + d, r.right - d, r.bottom - d}; }
 D2D1_RECT_F fieldRect(float y) { return {kFieldL, y, kFieldR, y + kRowH}; }
@@ -102,6 +111,10 @@ D2D1_RECT_F partRect(Part p) {
         case Part::Check: return kCheckBox;
         case Part::Open: return kOpenBox;
         case Part::Guide: return kGuideBox;
+        case Part::Pause: return circleRect(kPause, kPauseR);
+        case Part::AudioPause: return circleRect(kAudPause, kAudPauseR);
+        case Part::Screen: return fieldRect(kScreenY);
+        case Part::AudioFormat: return kFormatBox;
         case Part::None: break;
     }
     return {0, 0, 0, 0};
@@ -113,9 +126,12 @@ Part hitTest(float x, float y) {
     auto inCircle = [&](D2D1_POINT_2F c, float r) { return (x - c.x) * (x - c.x) + (y - c.y) * (y - c.y) <= r * r; };
     if (inCircle(kRec, kRecR + 2)) return Part::Record;
     if (inCircle(kAud, kAudR + 2)) return Part::Audio;
+    if (inCircle(kPause, kPauseR + 2)) return Part::Pause;   // only while recording (main.cpp keeps the enabled ones)
+    if (inCircle(kAudPause, kAudPauseR + 2)) return Part::AudioPause;
     auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
-    for (Part p : {Part::Pin, Part::Shot, Part::Gear, Part::Check, Part::Open})
+    for (Part p : {Part::Pin, Part::Shot, Part::Gear, Part::Check, Part::Open, Part::AudioFormat})
         if (in(partRect(p))) return p;
+    if (in({kL, kScreenY, kR, kScreenY + kRowH})) return Part::Screen;   // its map opens the menu too
     if (in({kL, kMicY, kFieldR, kMicY + kRowH})) return Part::Mic;
     if (in({kL, kSysY, kFieldR, kSysY + kRowH})) return Part::Sys;
     if (in(kGuideBox) || in(kBubble)) return Part::Guide;   // she says something else
@@ -130,12 +146,16 @@ bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p) {
         case Part::Audio: return ph == P::Idle || ph == P::Checking || (ph == P::Recording && audioOnly);
         case Part::Mic:
         case Part::Sys:
+        case Part::Screen:
+        case Part::AudioFormat:
         case Part::Check: return ph == P::Idle || ph == P::Checking;
         case Part::Pin:
         case Part::Shot:
         case Part::Gear:
         case Part::Open: return true;
         case Part::Guide: return ph != P::Starting && ph != P::Saving;
+        case Part::Pause: return ph == P::Recording && !audioOnly;
+        case Part::AudioPause: return ph == P::Recording && audioOnly;
         case Part::None: break;
     }
     return false;
@@ -197,8 +217,9 @@ bool UiPainter::init() {
     title_ = format(text, 14, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     sub_ = format(text, 10.5f, DWRITE_FONT_WEIGHT_NORMAL);
     name_ = format(text, 10.5f, DWRITE_FONT_WEIGHT_BOLD);
+    thumbMic_ = format(icons, 8, DWRITE_FONT_WEIGHT_NORMAL);   // in a 16 DIP taskbar button
     for (auto* f : {&brand_, &timer_, &chip_, &chipJp_, &hint_, &status_, &label_, &field_, &db_, &dbJp_, &path_, &badge_,
-                    &button_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &title_, &sub_, &name_})
+                    &button_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &title_, &sub_, &name_, &thumbMic_})
         if (!*f) return false;
     Com<IDWriteInlineObject> sign;
     if (SUCCEEDED(dw_->CreateEllipsisTrimmingSign(path_.get(), sign.put()))) {
@@ -207,7 +228,7 @@ bool UiPainter::init() {
     }
     hint_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
     db_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-    for (auto* f : {&chip_, &chipJp_, &dbJp_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_})
+    for (auto* f : {&chip_, &chipJp_, &dbJp_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &thumbMic_})
         (*f)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     return true;
 }
@@ -324,19 +345,145 @@ HRESULT UiPainter::snapshot(const std::wstring& png, UINT dpi, const UiModel& m)
         guide_[1].reset();
         guideTried_ = false;
     }
+    return SUCCEEDED(hr) ? writePng(bmp.get(), png) : hr;
+}
+
+HRESULT UiPainter::writePng(IWICBitmap* bmp, const std::wstring& png) const {
     Com<IWICStream> st;
     Com<IWICBitmapEncoder> enc;
     Com<IWICBitmapFrameEncode> fr;
-    if (SUCCEEDED(hr)) hr = wic_->CreateStream(st.put());
+    HRESULT hr = wic_->CreateStream(st.put());
     if (SUCCEEDED(hr)) hr = st->InitializeFromFilename(png.c_str(), GENERIC_WRITE);
     if (SUCCEEDED(hr)) hr = wic_->CreateEncoder(GUID_ContainerFormatPng, nullptr, enc.put());
     if (SUCCEEDED(hr)) hr = enc->Initialize(st.get(), WICBitmapEncoderNoCache);
     if (SUCCEEDED(hr)) hr = enc->CreateNewFrame(fr.put(), nullptr);
     if (SUCCEEDED(hr)) hr = fr->Initialize(nullptr);
-    if (SUCCEEDED(hr)) hr = fr->WriteSource(bmp.get(), nullptr);
+    if (SUCCEEDED(hr)) hr = fr->WriteSource(bmp, nullptr);
     if (SUCCEEDED(hr)) hr = fr->Commit();
     if (SUCCEEDED(hr)) hr = enc->Commit();
     return hr;
+}
+
+// ---------------------------------------------------------------- taskbar thumbnail buttons
+
+// Drawn on a 16 x 16 DIP square scaled to px: the same red dot and blue microphone as the window's buttons, and
+// plain media glyphs for pause, resume and stop.
+HRESULT UiPainter::renderThumb(ThumbGlyph g, int px, bool light, Com<IWICBitmap>* out) {
+    if (!d2d_ || !wic_ || px < 8) return E_FAIL;
+    Com<IWICBitmap> bmp;
+    Com<ID2D1RenderTarget> rt;
+    Com<ID2D1SolidColorBrush> b;
+    const float dpi = 96.f * static_cast<float>(px) / 16.f;
+    HRESULT hr = wic_->CreateBitmap(static_cast<UINT>(px), static_cast<UINT>(px), GUID_WICPixelFormat32bppPBGRA,
+                                    WICBitmapCacheOnLoad, bmp.put());
+    if (SUCCEEDED(hr))
+        hr = d2d_->CreateWicBitmapRenderTarget(
+            bmp.get(),
+            D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), dpi, dpi),
+            rt.put());
+    if (SUCCEEDED(hr)) hr = rt->CreateSolidColorBrush(C(kText), b.put());
+    if (FAILED(hr)) return hr;
+    rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    rt->BeginDraw();
+    rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+    const D2D1_POINT_2F c{8, 8};
+    const UINT32 ink = light ? 0x1E2430 : 0xF2F4F8;
+    auto disc = [&](UINT32 top, UINT32 bottom, UINT32 rim) {
+        const D2D1_GRADIENT_STOP st[2] = {{0.f, C(top)}, {1.f, C(bottom)}};
+        Com<ID2D1GradientStopCollection> sc;
+        Com<ID2D1LinearGradientBrush> gb;
+        if (SUCCEEDED(rt->CreateGradientStopCollection(st, 2, sc.put())) &&
+            SUCCEEDED(rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties({8, 1.5f}, {8, 14.5f}), sc.get(), gb.put())))
+            rt->FillEllipse(D2D1::Ellipse(c, 6.5f, 6.5f), gb.get());
+        b->SetColor(C(rim));
+        rt->DrawEllipse(D2D1::Ellipse(c, 6.1f, 6.1f), b.get(), 0.75f);
+    };
+    switch (g) {
+        case ThumbGlyph::Record:
+            disc(kRose, kCrimson, kRoseLight);
+            b->SetColor(C(0xFFFFFF));
+            rt->FillEllipse(D2D1::Ellipse(c, 2.2f, 2.2f), b.get());
+            break;
+        case ThumbGlyph::Audio:
+            disc(kBlueHi, kBlue, kBlueText);
+            b->SetColor(C(0xFFFFFF));
+            text(rt.get(), b.get(), std::wstring(1, kIconMic), thumbMic_.get(), {0, 0.25f, 16, 16.25f});
+            break;
+        case ThumbGlyph::Pause:
+            b->SetColor(C(ink));
+            for (float x : {4.25f, 9.25f})
+                rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, 3.5f, x + 2.5f, 12.5f), 0.75f, 0.75f), b.get());
+            break;
+        case ThumbGlyph::Resume: {
+            Com<ID2D1PathGeometry> tri;
+            Com<ID2D1GeometrySink> sink;
+            if (SUCCEEDED(d2d_->CreatePathGeometry(tri.put())) && SUCCEEDED(tri->Open(sink.put()))) {
+                sink->BeginFigure({4.75f, 3.25f}, D2D1_FIGURE_BEGIN_FILLED);
+                sink->AddLine({13, 8});
+                sink->AddLine({4.75f, 12.75f});
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                sink->Close();
+                b->SetColor(C(ink));
+                rt->FillGeometry(tri.get(), b.get());
+            }
+            break;
+        }
+        case ThumbGlyph::Stop:
+            b->SetColor(C(ink));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(4, 4, 12, 12), 1.5f, 1.5f), b.get());
+            break;
+    }
+    hr = rt->EndDraw();
+    if (SUCCEEDED(hr)) *out = bmp;
+    return hr;
+}
+
+HICON UiPainter::thumbIcon(ThumbGlyph g, int px, bool light) {
+    Com<IWICBitmap> bmp;
+    if (FAILED(renderThumb(g, px, light, &bmp))) return nullptr;
+    const size_t n = static_cast<size_t>(px) * static_cast<size_t>(px);
+    std::vector<uint32_t> pix(n);
+    if (FAILED(bmp->CopyPixels(nullptr, static_cast<UINT>(px) * 4, static_cast<UINT>(n * 4), reinterpret_cast<BYTE*>(pix.data()))))
+        return nullptr;
+    BITMAPV5HEADER bi{};   // icons take straight (not premultiplied) alpha
+    bi.bV5Size = sizeof(bi);
+    bi.bV5Width = px;
+    bi.bV5Height = -px;
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000;
+    bi.bV5GreenMask = 0x0000FF00;
+    bi.bV5BlueMask = 0x000000FF;
+    bi.bV5AlphaMask = 0xFF000000;
+    void* bits = nullptr;
+    HDC dc = GetDC(nullptr);
+    HBITMAP color = CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, dc);
+    if (!color || !bits) {
+        if (color) DeleteObject(color);
+        return nullptr;
+    }
+    uint32_t* o = static_cast<uint32_t*>(bits);
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t p = pix[i], a = p >> 24;
+        auto un = [a](uint32_t v) { return a ? std::min<uint32_t>(255, (v * 255 + a / 2) / a) : 0; };
+        o[i] = (a << 24) | (un((p >> 16) & 0xFF) << 16) | (un((p >> 8) & 0xFF) << 8) | un(p & 0xFF);
+    }
+    std::vector<uint8_t> zeros(static_cast<size_t>((px + 15) / 16 * 2) * static_cast<size_t>(px), 0);
+    HBITMAP mask = CreateBitmap(px, px, 1, 1, zeros.data());   // transparency comes from the alpha channel
+    ICONINFO ii{TRUE, 0, 0, mask, color};
+    HICON h = CreateIconIndirect(&ii);
+    DeleteObject(mask);
+    DeleteObject(color);
+    return h;
+}
+
+HRESULT UiPainter::thumbPng(ThumbGlyph g, int px, bool light, const std::wstring& png) {
+    Com<IWICBitmap> bmp;
+    const HRESULT hr = renderThumb(g, px, light, &bmp);
+    return SUCCEEDED(hr) ? writePng(bmp.get(), png) : hr;
 }
 
 // ---------------------------------------------------------------- text
@@ -411,6 +558,7 @@ void UiPainter::draw(ID2D1RenderTarget* rt, const UiModel& m) {
     drawIconButton(rt, b.get(), m, Part::Gear, kIconSettings, Look::Plain, 0);
 
     drawDeck(rt, b.get(), m);
+    drawScreen(rt, b.get(), fx.get(), m);
     drawChannel(rt, b.get(), fx.get(), m, Part::Mic, m.mic, L"マイク", kIconMic, kMicY);
     drawChannel(rt, b.get(), fx.get(), m, Part::Sys, m.sys, L"PC の音声", kIconSpeakers, kSysY);
     drawPath(rt, b.get(), fx.get(), m);
@@ -422,8 +570,8 @@ void UiPainter::draw(ID2D1RenderTarget* rt, const UiModel& m) {
     drawComment(rt, b.get(), m);
     drawGuide(rt, m);
 
-    if (rec) {   // everyone in the room can see that it records: a 2 px band across the top
-        b->SetColor(C(m.audioOnly ? kBlue : kCrimson));
+    if (rec) {   // everyone in the room can see that it records: a 2 px band across the top (amber while paused)
+        b->SetColor(C(m.paused ? kAmber : m.audioOnly ? kBlue : kCrimson));
         rt->FillRectangle(D2D1::RectF(0, 0, kClientW, 2), b.get());
     }
 }
@@ -494,49 +642,69 @@ void UiPainter::drawDeck(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
     const bool rec = m.phase == P::Recording;
     const bool live = rec || m.phase == P::Starting || m.phase == P::Saving;   // a recording is starting, made or saved
     const bool screenSide = live && !m.audioOnly, audioSide = live && m.audioOnly;
-    deckPanel(rt, b, left, rec && !m.audioOnly ? (m.alert ? 3 : 1) : 0);
-    deckPanel(rt, b, right, rec && m.audioOnly ? (m.alert ? 3 : 2) : 0);
+    // ❚❚ and the room it takes once the recording runs (while it starts the deck has not opened yet)
+    const bool started = rec || m.phase == P::Saving;
+    const UINT32 timeColor = m.phase == P::Starting ? kIcon : m.paused ? kText3 : kTimerLive;
+    deckPanel(rt, b, left, rec && !m.audioOnly && !m.paused ? (m.alert ? 3 : 1) : 0);
+    deckPanel(rt, b, right, rec && m.audioOnly && !m.paused ? (m.alert ? 3 : 2) : 0);
 
-    // recording side: button on the left; the time, REC and status (or what it records) to its right
+    // recording side: stop and pause on the left; the time, REC and status (or what it records) to their right
     rt->PushAxisAlignedClip(inset(left, 1), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     drawRecord(rt, b, m);
     if (screenSide) {
-        Com<IDWriteTextLayout> l = layout(m.timer, timer_.get(), kTimerBox);
+        const D2D1_RECT_F tb = started ? kRecTimerBox : kTimerBox;
+        if (started) drawPause(rt, b, m, Part::Pause);
+        Com<IDWriteTextLayout> l = layout(m.timer, timer_.get(), tb);
         if (l) {
-            b->SetColor(C(m.phase == P::Starting ? kIcon : kTimerLive));
-            rt->DrawTextLayout({kTimerBox.left, kTimerBox.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            b->SetColor(C(timeColor));
+            rt->DrawTextLayout({tb.left, tb.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
-        drawChip(rt, b, m, kChipX, false);
+        drawChip(rt, b, m, started ? kRecChipX : kChipX, false);
         drawHint(rt, b, m, edge - 10);
-        drawStatus(rt, b, m, {kTimerBox.left, kStatusTop, edge - 8, kStatusBottom});
+        drawStatus(rt, b, m, {tb.left, kStatusTop, edge - 8, kStatusBottom});
     } else {
         drawSideLabel(rt, b, {kTimerBox.left, kDeckTop, std::max(kTimerBox.left, edge - 10), kDeckBottom}, L"録画",
                       L"画面・マイク・PC の音声", m.recHotkey, false);
     }
     rt->PopAxisAlignedClip();
 
-    // audio side: button on the right; the time and status (or what it records) to its left
+    // audio side: stop on the right with pause beside it; the time and status (or what it records) to their left
     rt->PushAxisAlignedClip(inset(right, 1), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     drawAudio(rt, b, m);
     if (audioSide) {
-        Com<IDWriteTextLayout> l = layout(m.timer, timer_.get(), {kAudTimeRight - 200, kTimerBox.top, kAudTimeRight,
-                                                                   kTimerBox.bottom});
+        const float tr = started ? kAudTimeRightLive : kAudTimeRight;
+        if (started) drawPause(rt, b, m, Part::AudioPause);
+        Com<IDWriteTextLayout> l = layout(m.timer, timer_.get(), {tr - 200, kTimerBox.top, tr, kTimerBox.bottom});
         float tw = 0;
         if (l) {
             l->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
             DWRITE_TEXT_METRICS tm{};
             l->GetMetrics(&tm);
             tw = tm.width;
-            b->SetColor(C(m.phase == P::Starting ? kIcon : kTimerLive));
-            rt->DrawTextLayout({kAudTimeRight - 200, kTimerBox.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            b->SetColor(C(timeColor));
+            rt->DrawTextLayout({tr - 200, kTimerBox.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
-        drawChip(rt, b, m, kAudTimeRight - tw - 10 - 66, true);
-        drawStatus(rt, b, m, {std::max(right.left + 12, kEdgeAud + kDeckGap + 14), kStatusTop, kAudTimeRight + 4, kStatusBottom});
+        drawChip(rt, b, m, tr - tw - 10 - 66, true);
+        drawStatus(rt, b, m, {std::max(right.left + 12, kEdgeAud + kDeckGap + 14), kStatusTop, tr + 4, kStatusBottom});
     } else if (!screenSide || s < 0.99f) {
         drawSideLabel(rt, b, {std::min(kAudTimeRight, right.left + 10), kDeckTop, kAudTimeRight, kDeckBottom}, L"録音",
                       L"マイクと PC の音声", m.audioHotkey, true);
+        if (partEnabled(m.phase, m.audioOnly, Part::AudioFormat)) drawFormatChip(rt, b, m);
     }
     rt->PopAxisAlignedClip();
+}
+
+// MP3 ▾ left of 録音: the file a recording of sound alone makes; a click opens the choice (MP3 / WAV / M4A).
+void UiPainter::drawFormatChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m) {
+    const D2D1_RECT_F r = kFormatBox;
+    const bool hot = m.hot == Part::AudioFormat, down = hot && m.pressed == Part::AudioFormat;
+    panel(rt, b, r, 4, down ? kControlDown : hot ? kControlHot : kBlueChipBg, hot ? kBlueHi : kAudHeroBorder, 0);
+    const float dy = down ? 1.f : 0.f;
+    b->SetColor(C(hot ? kBluePale : kBlueText));
+    text(rt, b, m.audioFormat, chip_.get(), {r.left + 3, r.top + dy, r.right - 13, r.bottom + dy});
+    b->SetColor(C(hot ? kText2 : kText3));
+    text(rt, b, std::wstring(1, kIconChevron), chevron_.get(), {r.right - 15, r.top + dy, r.right - 3, r.bottom + dy});
+    if (m.showFocus && m.focus == Part::AudioFormat) focusRing(rt, b, r, 4);
 }
 
 // What a half does while it waits: its name, what it records, and its shortcut.
@@ -645,6 +813,42 @@ void UiPainter::drawAudio(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const 
     }
 }
 
+// ❚❚ beside the stop button while recording; ▶ in amber while paused. It stays (greyed) while the file is saved.
+void UiPainter::drawPause(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part p) {
+    const bool audio = p == Part::AudioPause;
+    const D2D1_POINT_2F c = audio ? kAudPause : kPause;
+    const float r = audio ? kAudPauseR : kPauseR, k = r / kPauseR;
+    const bool en = partEnabled(m.phase, m.audioOnly, p), hot = en && m.hot == p, down = hot && m.pressed == p;
+    const bool paused = en && m.paused;
+    b->SetColor(C(paused ? kWarnBg : kIdleOuter));
+    rt->FillEllipse(D2D1::Ellipse(c, r, r), b);
+    b->SetColor(C(!en ? kOffBorder : paused ? kAmber : hot ? kControlBorderHot : kIdleRing));
+    rt->DrawEllipse(D2D1::Ellipse(c, r - 1, r - 1), b, 2);
+    const float dy = down ? 1.f : 0.f;
+    if (paused) {   // resume
+        Com<ID2D1PathGeometry> tri;
+        Com<ID2D1GeometrySink> sink;
+        if (SUCCEEDED(d2d_->CreatePathGeometry(tri.put())) && SUCCEEDED(tri->Open(sink.put()))) {
+            sink->BeginFigure({c.x - 4.5f * k, c.y - 6.5f * k + dy}, D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine({c.x + 6.5f * k, c.y + dy});
+            sink->AddLine({c.x - 4.5f * k, c.y + 6.5f * k + dy});
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            b->SetColor(C(hot ? 0xFFFFFF : kAmberText));
+            rt->FillGeometry(tri.get(), b);
+        }
+    } else {        // pause
+        const float w = 3.5f * k, h = 6 * k, g = 1.75f * k;
+        b->SetColor(C(!en ? kOffText : hot ? kText : kLabel));
+        for (float x : {c.x - g - w, c.x + g})
+            rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, c.y - h + dy, x + w, c.y + h + dy), 1, 1), b);
+    }
+    if (m.showFocus && m.focus == p) {
+        b->SetColor(C(kCyan));
+        rt->DrawEllipse(D2D1::Ellipse(c, r + 3, r + 3), b, 1.5f);
+    }
+}
+
 // REC (screen, crimson) / AUDIO (blue) with a breathing dot while recording, 確認中 while checking the levels.
 void UiPainter::drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float x, bool audio) {
     using P = UiModel::Phase;
@@ -657,6 +861,17 @@ void UiPainter::drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
         return;
     }
     if (m.phase != P::Recording) return;
+    if (m.paused) {   // PAUSE with two breathing bars, in amber
+        const D2D1_RECT_F r{x, kChipY, x + 66, kChipY + kChipH};
+        const float cy = (r.top + r.bottom) / 2;
+        panel(rt, b, r, 4, kWarnBg, kWarnBorder, 0);
+        b->SetColor(C(kAmber, 0.35f + 0.65f * m.pulse));
+        rt->FillRectangle(D2D1::RectF(r.left + 7, cy - 3.5f, r.left + 9, cy + 3.5f), b);
+        rt->FillRectangle(D2D1::RectF(r.left + 11, cy - 3.5f, r.left + 13, cy + 3.5f), b);
+        b->SetColor(C(kAmberText));
+        text(rt, b, L"PAUSE", chip_.get(), {r.left + 15, r.top, r.right - 3, r.bottom}, 0.8f);
+        return;
+    }
     const std::wstring s = audio ? L"AUDIO" : L"REC";
     const D2D1_RECT_F r{x, kChipY, x + (audio ? 66.f : 52.f), kChipY + kChipH};
     panel(rt, b, r, 4, audio ? kBlueChipBg : kRecChipBg, audio ? kBlue : kCrimson, 0);
@@ -675,12 +890,14 @@ void UiPainter::drawHint(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
     if (s.empty()) return;
     const D2D1_RECT_F box{right - 160, 54, right, 72};
     const float tw = textWidth(s, hint_.get());
+    const float clear = kRecChipX + (m.paused ? 66.f : 52.f) + 6;   // right of the REC / PAUSE chip
+    if (rec && box.right - tw < clear) return;   // a long shortcut does not fit beside ❚❚, the time and the chip
     b->SetColor(C(kHint));
     text(rt, b, s, hint_.get(), box);
     const float x = box.right - tw - 6;
     const float cy = (box.top + box.bottom) / 2;
     if (rec) {
-        if (x - 14 >= kChipX + 52 + 6)   // the camera only when it clears the REC chip
+        if (x - 14 >= clear)   // the camera only when it clears the chip too
             text(rt, b, std::wstring(1, kIconCamera), iconSmall_.get(), {x - 14, box.top, x, box.bottom});
     } else {
         b->SetColor(C(kRose, 0.85f));
@@ -786,6 +1003,68 @@ void UiPainter::drawMeter(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const 
     }
 }
 
+// The monitor to record, in a field like the devices (the setting while idle, in cyan while it is recorded), and
+// beside it a small map of the desktop with that monitor lit: the numbers in its menu are the map's numbers.
+void UiPainter::drawScreen(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m) {
+    const float y = kScreenY;
+    const D2D1_RECT_F f = partRect(Part::Screen);
+    const bool en = partEnabled(m.phase, m.audioOnly, Part::Screen), hot = en && m.hot == Part::Screen,
+               down = hot && m.pressed == Part::Screen;
+    const bool live = m.screen.active;
+    b->SetColor(C(live ? kCyan : kIcon));
+    text(rt, b, std::wstring(1, kIconMonitor), icon_.get(), {kL, y, kL + 18, y + kRowH});
+    b->SetColor(C(kLabel));
+    text(rt, b, L"画面", label_.get(), {kL + 20, y, kFieldL - 2, y + kRowH});
+    panel(rt, b, f, 5, down ? kControlDown : hot ? kControlHot : kInput, hot ? kControlBorderHot : kInputBorder, kInputEdge);
+    const D2D1_RECT_F tr{f.left + 8, f.top, f.right - 22, f.bottom};
+    Com<IDWriteTextLayout> l = layout(m.screen.choice, field_.get(), tr);
+    if (l) {
+        if (live) {
+            const DWRITE_TEXT_RANGE all{0, static_cast<UINT32>(m.screen.choice.size())};
+            fx->SetColor(C(kCyanText));
+            l->SetDrawingEffect(fx, all);
+            l->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, all);
+        }
+        b->SetColor(C(en || live ? kFieldText : kText3));
+        rt->DrawTextLayout({tr.left, tr.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+    b->SetColor(C(en ? (hot ? kText2 : kText3) : kOffText));
+    text(rt, b, std::wstring(1, kIconChevron), chevron_.get(), {f.right - 20, f.top, f.right - 6, f.bottom});
+    if (m.showFocus && m.focus == Part::Screen) focusRing(rt, b, f, 5);
+    drawScreenMap(rt, b, m.screen, {kMeterL, y, kR, y + kRowH});
+}
+
+void UiPainter::drawScreenMap(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const ScreenView& s, const D2D1_RECT_F& box) {
+    panel(rt, b, box, 5, kMeterBox, kMeterBorder, 0);
+    if (s.monitors.empty()) return;
+    RECT u = s.monitors[0];
+    for (const RECT& r : s.monitors) {
+        u.left = std::min(u.left, r.left);
+        u.top = std::min(u.top, r.top);
+        u.right = std::max(u.right, r.right);
+        u.bottom = std::max(u.bottom, r.bottom);
+    }
+    const float uw = static_cast<float>(std::max(1L, u.right - u.left)), uh = static_cast<float>(std::max(1L, u.bottom - u.top));
+    const float k = std::min((box.right - box.left - 16) / uw, (box.bottom - box.top - 5) / uh);
+    const float ox = std::round((box.left + box.right) / 2 - uw * k / 2), oy = std::round((box.top + box.bottom) / 2 - uh * k / 2);
+    for (size_t i = 0; i < s.monitors.size(); ++i) {
+        const RECT& r = s.monitors[i];
+        const D2D1_RECT_F q{ox + static_cast<float>(r.left - u.left) * k + 0.75f, oy + static_cast<float>(r.top - u.top) * k + 0.75f,
+                            ox + static_cast<float>(r.right - u.left) * k - 0.75f,
+                            oy + static_cast<float>(r.bottom - u.top) * k - 0.75f};
+        const bool sel = static_cast<int>(i) == s.selected;
+        const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(q, 1.5f, 1.5f);
+        b->SetColor(C(sel ? (s.active ? kRecChipBg : kPinOnFill) : kControl));
+        rt->FillRoundedRectangle(rr, b);
+        b->SetColor(C(sel ? (s.active ? kCrimson : kCyan) : kControlBorderHot));
+        rt->DrawRoundedRectangle(rr, b, 1);
+        if (q.right - q.left >= 9 && q.bottom - q.top >= 9) {
+            b->SetColor(C(sel ? (s.active ? kRosePale : kCyanText) : kText3));
+            text(rt, b, std::to_wstring(i + 1), counter_.get(), q);
+        }
+    }
+}
+
 void UiPainter::drawPath(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m) {
     using P = UiModel::Phase;
     const D2D1_RECT_F r = kPathBox;
@@ -875,9 +1154,10 @@ float UiPainter::commentWidth(const std::wstring& s) const {
     return tm.widthIncludingTrailingWhitespace;
 }
 
-// The SD guide stands in the corner with her booklet, and takes notes while something is being recorded.
+// The SD guide stands in the corner with her booklet, and takes notes while something is being recorded (she puts
+// the pen down while it is paused).
 void UiPainter::drawGuide(ID2D1RenderTarget* rt, const UiModel& m) {
-    const int k = m.phase == UiModel::Phase::Recording && guide_[1] ? 1 : 0;
+    const int k = m.phase == UiModel::Phase::Recording && !m.paused && guide_[1] ? 1 : 0;
     if (!guide_[k]) return;
     const float s = static_cast<float>(dpi_) / 96.f;
     const D2D1_SIZE_F z = guideDip_[k];

@@ -19,9 +19,12 @@ static const char* kDefaultIni =
     "fps=15\r\n"
     "; 映像のビットレート (kbps)。1080p で 2000 なら 1 時間でおよそ 0.9 GB\r\n"
     "video_kbps=2000\r\n"
-    "; 音声のビットレート (kbps)。96 / 128 / 160 / 192\r\n"
+    "; 音声のビットレート (kbps)。96 / 128 / 160 / 192 (録画の AAC と、録音だけの MP3 / M4A)\r\n"
     "audio_kbps=128\r\n"
-    "; 録る画面。0 = メインの画面、1 以降 = ほかの画面\r\n"
+    "; 録音だけの形式: mp3 (小さく、どこでも再生できる) / wav (無圧縮。1 時間でおよそ 690 MB・5 時間 47 分まで)\r\n"
+    ";   / m4a (AAC)。録音の帯の切り替えでも選べます。録画はいつも MP4 です\r\n"
+    "audio_format=mp3\r\n"
+    "; 録る画面。0 = メインの画面、1 以降 = ほかの画面 (窓の「画面」の欄で選ぶと書き換わる。欄の番号から 1 を引いた数)\r\n"
     "monitor=0\r\n"
     "; マウスカーソルを映す (1 / 0)\r\n"
     "cursor=1\r\n"
@@ -54,7 +57,7 @@ static const char* kDefaultIni =
     "shot_clipboard=1\r\n"
     "; スクショのショートカット。none で無効\r\n"
     "shot_hotkey=Ctrl+Alt+Shift+S\r\n"
-    "; 録音だけ (画面なし・.m4a) の開始と停止のショートカット。none で無効\r\n"
+    "; 録音だけ (画面なし・audio_format の形式) の開始と停止のショートカット。none で無効\r\n"
     "audio_hotkey=Ctrl+Alt+Shift+A\r\n"
     "\r\n"
     "; 設定のメニュー (右上の歯車) から開くページ\r\n"
@@ -181,6 +184,10 @@ Config loadConfig(std::vector<std::string>* warn) {
             toInt(96, 192, x);
             if (x == 96 || x == 128 || x == 160 || x == 192) c.audioKbps = x; else bad(k, v);
         }
+        else if (k == L"audio_format") {
+            const std::wstring lv = lower(v);
+            if (lv == L"mp3" || lv == L"wav" || lv == L"m4a") c.audioFormat = lv; else bad(k, v);
+        }
         else if (k == L"monitor") toInt(0, 16, c.monitor);
         else if (k == L"mic") c.mic = v.empty() ? L"none" : v;
         else if (k == L"system") c.system = v.empty() ? L"none" : v;
@@ -241,14 +248,14 @@ bool saveConfigValue(const std::wstring& key, const std::wstring& value) {
 }
 
 std::string configJson(const Config& c) {
-    return fmt("{\"out_dir\":%s,\"name_prefix\":%s,\"fps\":%d,\"video_kbps\":%d,\"audio_kbps\":%d,\"monitor\":%d,"
-               "\"mic\":%s,\"system\":%s,\"mic_gain_db\":%.1f,\"system_gain_db\":%.1f,\"cursor\":%s,"
+    return fmt("{\"out_dir\":%s,\"name_prefix\":%s,\"fps\":%d,\"video_kbps\":%d,\"audio_kbps\":%d,\"audio_format\":%s,"
+               "\"monitor\":%d,\"mic\":%s,\"system\":%s,\"mic_gain_db\":%.1f,\"system_gain_db\":%.1f,\"cursor\":%s,"
                "\"container\":%s,\"hw_encode\":%s,\"latency_ms\":%d,\"hotkey\":%s,\"topmost\":%s,\"shot_dir\":%s,"
                "\"shot_clipboard\":%s,\"shot_hotkey\":%s,\"audio_hotkey\":%s}",
                json(c.resolvedOutDir()).c_str(), json(c.namePrefix).c_str(), c.fps, c.videoKbps, c.audioKbps,
-               c.monitor, json(c.mic).c_str(), json(c.system).c_str(), c.micGainDb, c.systemGainDb,
-               c.cursor ? "true" : "false", json(c.container).c_str(), c.hwEncode ? "true" : "false", c.latencyMs,
-               json(c.hotkey).c_str(), c.topmost ? "true" : "false", json(c.resolvedShotDir()).c_str(),
+               json(c.audioFormat).c_str(), c.monitor, json(c.mic).c_str(), json(c.system).c_str(), c.micGainDb,
+               c.systemGainDb, c.cursor ? "true" : "false", json(c.container).c_str(), c.hwEncode ? "true" : "false",
+               c.latencyMs, json(c.hotkey).c_str(), c.topmost ? "true" : "false", json(c.resolvedShotDir()).c_str(),
                c.shotClipboard ? "true" : "false", json(c.shotHotkey).c_str(), json(c.audioHotkey).c_str());
 }
 

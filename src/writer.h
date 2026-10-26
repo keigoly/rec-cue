@@ -10,15 +10,23 @@
 
 namespace rc {
 
+// The file of a recording of sound alone (a recording of the screen is always an MP4 with H.264 and AAC):
+// AAC in fragmented MP4, MP3 (Windows' own encoder, Windows 8+), or 16-bit PCM WAVE written directly.
+enum class AudioFile { M4a, Mp3, Wav };
+AudioFile audioFileOf(const std::wstring& s);   // "mp3" / "wav" / "m4a" (also ".mp3"...); M4a otherwise
+const wchar_t* audioFileExt(AudioFile f);       // L".mp3"
+const char* audioFileName(AudioFile f);         // "mp3"
+
 struct WriterParams {
     std::wstring path;
     UINT width = 0, height = 0, fps = 15;
     UINT videoBitrate = 2000000;
-    UINT audioBytesPerSec = 16000;   // 16000 = 128 kbps AAC
+    UINT audioBytesPerSec = 16000;   // 16000 = 128 kbps AAC / MP3
     bool fragmented = true;          // fMP4 survives a crash up to the last fragment
     bool hardware = true;            // allow hardware MFTs
     bool d3d = true;                 // hand GPU textures to the encoder (no CPU copy)
-    bool video = true;               // false: audio only (an .m4a)
+    bool video = true;               // false: audio only, into `audioFile`
+    AudioFile audioFile = AudioFile::M4a;
 };
 
 class Writer {
@@ -34,7 +42,8 @@ public:
     std::string pipeline;     // e.g. "video: Video Processor MFT > Intel Quick Sync H.264 Encoder MFT [hw]"
     bool usesD3D() const { return d3d_; }
     bool encoderIsHardware = false;
-    bool durationPatched = false;   // fMP4 only: track durations written back after Finalize
+    bool durationPatched = false;   // fMP4: track durations written back after Finalize (MP3 / WAV: nothing to patch)
+    bool full() const { return full_.load(); }   // WAV: the most a WAVE file can hold is written (the recorder stops)
 
     std::atomic<uint64_t> videoSamples{0}, videoDrops{0}, audioSamples{0}, writeErrors{0};
     std::atomic<int64_t> maxVideoWriteUs{0};
@@ -42,6 +51,8 @@ public:
 private:
     HRESULT openOnce(const WriterParams& p, bool d3d);
     HRESULT openVideo(const WriterParams& p, const Stopwatch& sw);
+    HRESULT openWav(const WriterParams& p);
+    bool wavHeader();   // the RIFF header with the sizes written so far
     void describe();
     void patchTrackDurations();
 
@@ -61,6 +72,10 @@ private:
     std::wstring path_;
     UINT w_ = 0, h_ = 0;
     HRESULT lastErr_ = S_OK;
+    HANDLE wav_ = INVALID_HANDLE_VALUE;   // WAV: written here instead of by the sink writer
+    uint64_t wavBytes_ = 0;               // PCM bytes in it
+    int64_t wavSyncAt_ = 0;               // when its header is next brought up to date (QPC)
+    std::atomic<bool> full_{false};
 };
 
 }  // namespace rc

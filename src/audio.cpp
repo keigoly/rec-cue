@@ -591,6 +591,11 @@ void AudioEngine::open(const Config& c, std::vector<std::string>* notes) {
     stopFrames_ = -1;
     stopNow_ = false;
     mixed_ = 0;
+    cut_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(cutMu_);
+        cuts_.clear();
+    }
     clipped_ = 0;
     for (int k = 0; k < 2; ++k) {
         mPk_[k] = 0;
@@ -641,6 +646,21 @@ void AudioEngine::stopNow() {
         cv_.notify_all();
     }
     th_.join();
+}
+
+// The mixer runs latency_ms behind the clock, so a pause or resume at "now" is still ahead of it.
+void AudioEngine::pauseAt(int64_t qpc) {
+    const int64_t f = std::max<int64_t>(0, (qpcTo100ns(qpc) - start100_) * 48000 / 10000000);
+    std::lock_guard<std::mutex> lk(cutMu_);
+    if (!cuts_.empty() && cuts_.back().second == INT64_MAX) return;   // already paused
+    cuts_.push_back({f, INT64_MAX});
+}
+
+void AudioEngine::resumeAt(int64_t qpc) {
+    const int64_t f = (qpcTo100ns(qpc) - start100_) * 48000 / 10000000;
+    std::lock_guard<std::mutex> lk(cutMu_);
+    if (cuts_.empty() || cuts_.back().second != INT64_MAX) return;
+    cuts_.back().second = std::max(cuts_.back().first, f);
 }
 
 std::wstring AudioEngine::micName() const { std::lock_guard<std::mutex> lk(statsMu_); return micName_; }
@@ -958,16 +978,35 @@ void AudioEngine::mix(uint32_t n) {
             if (p < kSilent) { s->wSilent++; s->sSilent++; }
         }
     }
-    finishMeters(true, pk[0], ss[0], n);
-    finishMeters(false, pk[1], ss[1], n);
+    // a paused recording leaves out [from, to) of the timeline; the rest moves back by what was left out before it
+    cutNow_.clear();
+    {
+        std::lock_guard<std::mutex> lk(cutMu_);
+        for (auto& c : cuts_)
+            if (c.second > pos && c.first < pos + n) cutNow_.push_back(c);
+    }
+    const bool paused = !cutNow_.empty() && cutNow_.front().first <= pos && cutNow_.front().second >= pos + n;
+    finishMeters(true, pk[0], ss[0], n, paused);
+    finishMeters(false, pk[1], ss[1], n, paused);
     if (sink_) {
-        if (out_.empty()) outStart_ = pos;
-        for (size_t i = 0; i < acc_.size(); ++i) {
-            float v = acc_[i];
-            if (v > 1.f) { v = 1.f; clipped_++; }
-            else if (v < -1.f) { v = -1.f; clipped_++; }
-            out_.push_back(static_cast<int16_t>(std::lround(v * 32767.f)));
+        int64_t cut = cut_.load();
+        size_t ci = 0;
+        for (uint32_t k = 0; k < n; ++k) {
+            const int64_t q = pos + k;
+            while (ci < cutNow_.size() && cutNow_[ci].second <= q) ++ci;
+            if (ci < cutNow_.size() && cutNow_[ci].first <= q) {
+                ++cut;
+                continue;
+            }
+            if (out_.empty()) outStart_ = q - cut;
+            for (size_t i = 2 * static_cast<size_t>(k); i < 2 * static_cast<size_t>(k) + 2; ++i) {
+                float v = acc_[i];
+                if (v > 1.f) { v = 1.f; clipped_++; }
+                else if (v < -1.f) { v = -1.f; clipped_++; }
+                out_.push_back(static_cast<int16_t>(std::lround(v * 32767.f)));
+            }
         }
+        cut_ = cut;
         if (out_.size() / 2 >= kSinkFrames) {
             sink_(out_.data(), static_cast<uint32_t>(out_.size() / 2), outStart_ * 10000000 / 48000);
             out_.clear();
@@ -976,13 +1015,14 @@ void AudioEngine::mix(uint32_t n) {
     mixed_ = pos + n;
 }
 
-void AudioEngine::finishMeters(bool isMic, float peak, double ss, uint32_t n) {
+// paused: the time does not count as silence (a long pause must not end in the "silent for a minute" warning)
+void AudioEngine::finishMeters(bool isMic, float peak, double ss, uint32_t n, bool paused) {
     const int k = isMic ? 0 : 1;
     Meter& m = isMic ? mic : sys;
     mPk_[k] = std::max(mPk_[k], peak);
     mSs_[k] += ss;
     mN_[k] += n;
-    silentRun_[k] = peak < kSilent ? silentRun_[k] + static_cast<int64_t>(n) : 0;
+    silentRun_[k] = peak < kSilent && !paused ? silentRun_[k] + static_cast<int64_t>(n) : 0;
     if (mN_[k] >= 4800) {
         m.peakDb10 = db10(mPk_[k]);
         m.rmsDb10 = db10(static_cast<float>(std::sqrt(mSs_[k] / (2.0 * mN_[k]))));

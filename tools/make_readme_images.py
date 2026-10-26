@@ -7,14 +7,14 @@
 見本の画面は音量・機器名・フォルダーが作りもの (--ui-snapshot) なので、PC の中身は写らない。
 - icon.png: res/app.ico の 256 px
 - hero.png: 待機中と録画中の窓を並べた見出しの絵 (角は透明)
-- idle / rec / audio / shot / check / warn / saved / talk.png: 各場面の窓 (2 倍・そのまま)
+- idle / rec / paused / audio / shot / check / warn / saved / talk.png: 各場面の窓 (2 倍・そのまま)
 """
 import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-STATES = ["idle", "rec", "audio", "shot", "check", "warn", "saved", "talk"]
+STATES = ["idle", "rec", "paused", "audio", "shot", "check", "warn", "saved", "talk"]
 FONT = "/System/Library/Fonts/ヒラギノ角ゴシック W5.ttc"
 
 
@@ -27,9 +27,10 @@ def rounded(im, r):
 
 
 def hero(idle, rec):
-    W, H, win_w, gap, top = 1760, 680, 780, 60, 64
+    W, win_w, gap, top = 1760, 780, 60, 64
     scale = win_w / idle.size[0]
     win_h = round(idle.size[1] * scale)
+    H = max(680, top + win_h + 120)   # room for the label under the windows (the window grew in 0.4.0)
     left = (W - 2 * win_w - gap) // 2
     canvas = Image.new("RGBA", (W, H))
     top_c, bottom_c = (0x1A, 0x1F, 0x2A), (0x0D, 0x10, 0x16)

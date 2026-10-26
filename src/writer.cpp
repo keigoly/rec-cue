@@ -28,11 +28,27 @@ std::wstring attrString(IMFAttributes* a, REFGUID key) {
         }                                                                       \
     } while (0)
 
+// WAVE: 16-bit PCM, 48 kHz, stereo. The RIFF sizes are 32-bit, so a file holds at most 4 GB; stopping a little
+// before that leaves room for the header (4,000,000,000 bytes = 5 h 47 min).
+constexpr uint32_t kWavRate = 48000, kWavBytesPerSec = kWavRate * 4;
+constexpr uint64_t kWavMaxData = 4000000000ull;
+
 }  // namespace
+
+AudioFile audioFileOf(const std::wstring& s) {
+    const std::wstring v = lower(s);
+    if (v == L"mp3" || v == L".mp3") return AudioFile::Mp3;
+    if (v == L"wav" || v == L".wav") return AudioFile::Wav;
+    return AudioFile::M4a;
+}
+
+const wchar_t* audioFileExt(AudioFile f) { return f == AudioFile::Mp3 ? L".mp3" : f == AudioFile::Wav ? L".wav" : L".m4a"; }
+const char* audioFileName(AudioFile f) { return f == AudioFile::Mp3 ? "mp3" : f == AudioFile::Wav ? "wav" : "m4a"; }
 
 Writer::~Writer() { close(); }
 
 HRESULT Writer::open(const WriterParams& p, ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+    if (!p.video && p.audioFile == AudioFile::Wav) return openWav(p);
     dev_ = Com<ID3D11Device>::from(dev);
     ctx_ = Com<ID3D11DeviceContext>::from(ctx);
     w_ = p.width;
@@ -52,11 +68,13 @@ HRESULT Writer::openOnce(const WriterParams& p, bool d3d) {
     d3d_ = d3d;
     video_ = p.video;
     finalized_ = false;
-    fragmented_ = p.fragmented;
+    const bool mp3 = !p.video && p.audioFile == AudioFile::Mp3;   // an .mp3 of MPEG-1 Layer III frames, no MP4 boxes
+    fragmented_ = p.fragmented && !mp3;
     path_ = p.path;
     Com<IMFAttributes> a;
     TRY("attributes", MFCreateAttributes(a.put(), 6));
-    a->SetGUID(MF_TRANSCODE_CONTAINERTYPE, p.fragmented ? MFTranscodeContainerType_FMPEG4 : MFTranscodeContainerType_MPEG4);
+    a->SetGUID(MF_TRANSCODE_CONTAINERTYPE, mp3 ? MFTranscodeContainerType_MP3
+                                               : fragmented_ ? MFTranscodeContainerType_FMPEG4 : MFTranscodeContainerType_MPEG4);
     a->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, p.hardware ? TRUE : FALSE);
     a->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
     if (d3d) {
@@ -71,13 +89,15 @@ HRESULT Writer::openOnce(const WriterParams& p, bool d3d) {
     Com<IMFMediaType> ao;
     TRY("audio type", MFCreateMediaType(ao.put()));
     ao->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-    ao->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-    ao->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    ao->SetGUID(MF_MT_SUBTYPE, mp3 ? MFAudioFormat_MP3 : MFAudioFormat_AAC);
     ao->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, 48000);
     ao->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
-    ao->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, p.audioBytesPerSec);
-    ao->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
-    ao->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+    ao->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, p.audioBytesPerSec);   // 96-192 kbps: valid for both
+    if (!mp3) {
+        ao->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        ao->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
+        ao->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+    }
     TRY("add audio stream", sw_->AddStream(ao.get(), &as_));
 
     Com<IMFMediaType> ai;
@@ -111,9 +131,62 @@ HRESULT Writer::openOnce(const WriterParams& p, bool d3d) {
                        pipeline.c_str()));
     else
         Log::event("writer.open", true, sw.ms(),
-                   fmt("audio only / aac %u kbps / %s / %s", p.audioBytesPerSec * 8 / 1000, p.fragmented ? "fmp4" : "mp4",
-                       pipeline.c_str()));
+                   fmt("audio only / %s %u kbps / %s / %s", mp3 ? "mp3" : "aac", p.audioBytesPerSec * 8 / 1000,
+                       mp3 ? "mp3" : fragmented_ ? "fmp4" : "mp4", pipeline.c_str()));
     return S_OK;
+}
+
+// WAVE is written here rather than by Media Foundation, so that its header can be brought up to date every second:
+// a crash then leaves a file that plays up to about a second before it (like the fragmented MP4).
+HRESULT Writer::openWav(const WriterParams& p) {
+    Stopwatch sw;
+    video_ = false;
+    finalized_ = false;
+    fragmented_ = false;
+    path_ = p.path;
+    wavBytes_ = 0;
+    full_ = false;
+    wav_ = CreateFileW(p.path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (wav_ == INVALID_HANDLE_VALUE) {
+        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        Log::event("writer.open", false, sw.ms(), "create wav", hr);
+        return hr;
+    }
+    if (!wavHeader()) {
+        const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+        Log::event("writer.open", false, sw.ms(), "wav header", hr);
+        CloseHandle(wav_);
+        wav_ = INVALID_HANDLE_VALUE;
+        return hr;
+    }
+    wavSyncAt_ = qpcNow() + qpcFreq();
+    pipeline = "audio: pcm 16-bit 48 kHz stereo (written directly)";
+    Log::event("writer.open", true, sw.ms(), fmt("audio only / pcm %u kbps / wav", kWavBytesPerSec * 8 / 1000));
+    return S_OK;
+}
+
+bool Writer::wavHeader() {
+    uint8_t h[44];
+    auto put = [&h](size_t o, uint32_t v, int n) {
+        for (int i = 0; i < n; ++i) h[o + i] = static_cast<uint8_t>(v >> (8 * i));
+    };
+    const uint32_t data = static_cast<uint32_t>(wavBytes_);
+    memcpy(h, "RIFF", 4);
+    put(4, 36 + data, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    put(16, 16, 4);                // the fmt chunk's size
+    put(20, 1, 2);                 // PCM
+    put(22, 2, 2);                 // channels
+    put(24, kWavRate, 4);
+    put(28, kWavBytesPerSec, 4);
+    put(32, 4, 2);                 // bytes per frame
+    put(34, 16, 2);                // bits per sample
+    memcpy(h + 36, "data", 4);
+    put(40, data, 4);
+    LARGE_INTEGER zero{};
+    DWORD w = 0;
+    return SetFilePointerEx(wav_, zero, nullptr, FILE_BEGIN) && WriteFile(wav_, h, sizeof(h), &w, nullptr) && w == sizeof(h) &&
+           SetFilePointerEx(wav_, zero, nullptr, FILE_END);
 }
 
 // H.264 output and BGRA input of the video stream (only when recording the screen).
@@ -275,8 +348,31 @@ HRESULT Writer::writeVideo(ID3D11Texture2D* src, int64_t t100ns, int64_t dur100n
 
 HRESULT Writer::writeAudio(const int16_t* pcm, uint32_t frames, int64_t t100ns) {
     std::lock_guard<std::mutex> lk(mu_);
-    if (!sw_ || finalized_) return E_UNEXPECTED;
     const DWORD bytes = frames * 4;
+    if (wav_ != INVALID_HANDLE_VALUE) {   // the mixer's blocks follow on without gaps (pauses are cut out before here)
+        if (finalized_) return E_UNEXPECTED;
+        if (wavBytes_ + bytes > kWavMaxData) {
+            if (!full_.exchange(true)) Log::event("writer.audio", false, -1, "the WAV file is full (4 GB); stopping");
+            return S_FALSE;
+        }
+        DWORD w = 0;
+        if (!WriteFile(wav_, pcm, bytes, &w, nullptr) || w != bytes) {
+            const HRESULT hr = HRESULT_FROM_WIN32(GetLastError());
+            writeErrors++;
+            if (hr != lastErr_) Log::event("writer.audio", false, -1, "audio was not written to the WAV file", hr);
+            lastErr_ = hr;
+            return hr;
+        }
+        wavBytes_ += bytes;
+        audioSamples++;
+        const int64_t now = qpcNow();
+        if (now >= wavSyncAt_) {   // the sizes in the header, once a second (what a crash would leave)
+            if (!wavHeader()) writeErrors++;
+            wavSyncAt_ = now + qpcFreq();
+        }
+        return S_OK;
+    }
+    if (!sw_ || finalized_) return E_UNEXPECTED;
     Com<IMFMediaBuffer> b;
     Com<IMFSample> s;
     HRESULT hr = MFCreateMemoryBuffer(bytes, b.put());
@@ -306,11 +402,28 @@ HRESULT Writer::writeAudio(const int16_t* pcm, uint32_t frames, int64_t t100ns) 
 
 HRESULT Writer::finalize(double* ms) {
     std::lock_guard<std::mutex> lk(mu_);
+    if (wav_ != INVALID_HANDLE_VALUE && !finalized_) {
+        Stopwatch sw;
+        const bool ok = wavHeader();
+        const HRESULT hr = ok ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(wav_);
+        wav_ = INVALID_HANDLE_VALUE;
+        finalized_ = true;
+        durationPatched = ok;
+        if (ms) *ms = sw.ms();
+        Log::event("writer.finalize", ok, sw.ms(),
+                   fmt("wav %.1f s %.1f MB audio=%llu errors=%llu", static_cast<double>(wavBytes_) / kWavBytesPerSec,
+                       static_cast<double>(wavBytes_) / 1048576.0, static_cast<unsigned long long>(audioSamples.load()),
+                       static_cast<unsigned long long>(writeErrors.load())),
+                   hr);
+        return hr;
+    }
     if (!sw_ || finalized_) return S_FALSE;
     Stopwatch sw;
     HRESULT hr = sw_->Finalize();
     finalized_ = true;
     if (SUCCEEDED(hr) && fragmented_) patchTrackDurations();
+    else if (SUCCEEDED(hr) && !video_) durationPatched = true;   // MP3: its length is in the frames, nothing to patch
     if (ms) *ms = sw.ms();
     Log::event("writer.finalize", SUCCEEDED(hr), sw.ms(),
                fmt("video=%llu drops=%llu audio=%llu errors=%llu", static_cast<unsigned long long>(videoSamples.load()),
@@ -431,6 +544,11 @@ void Writer::patchTrackDurations() {
 
 void Writer::close() {
     std::lock_guard<std::mutex> lk(mu_);
+    if (wav_ != INVALID_HANDLE_VALUE) {   // not finalized (a failed start): what was written stays readable
+        wavHeader();
+        CloseHandle(wav_);
+        wav_ = INVALID_HANDLE_VALUE;
+    }
     if (alloc_) alloc_->UninitializeSampleAllocator();
     alloc_.reset();
     sw_.reset();

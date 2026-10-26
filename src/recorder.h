@@ -16,9 +16,10 @@ namespace rc {
 
 struct RecordOptions {
     bool testPattern = false;   // synthetic picture instead of the screen (self-test, no screen content)
-    bool audioOnly = false;     // microphone + PC audio only, into an .m4a (no screen)
+    bool audioOnly = false;     // microphone + PC audio only (no screen), as audio_format says: .mp3 / .wav / .m4a
     double maxSeconds = 0;      // 0 = until stop()
-    std::wstring outPath;       // empty = <out_dir>\<prefix> <start time>.mp4 (.m4a when audio only)
+    std::wstring outPath;       // empty = <out_dir>\<prefix> <start time>.mp4 (.mp3 / .wav / .m4a when audio only);
+                                // for audio only its extension, when it is one of those, decides the format
 };
 
 class Recorder {
@@ -39,6 +40,13 @@ public:
     int64_t qpcStart() const { return qpcStart_; }
     // A screenshot taken during this recording, `atS` seconds in (listed in the summary).
     void noteShot(const std::wstring& path, double atS);
+    // Pause / resume. Nothing is recorded in between, and the file goes on without a gap: the paused time is left
+    // out of the picture and the sound alike. false: not recording, already so, or the file is being finished.
+    bool pause();
+    bool resume();
+    bool paused() const { return pausedNow_.load(); }
+    double pausedSec() const;   // every pause so far, the current one included
+    int pauses() const;
 
     AudioEngine audio;
 
@@ -47,9 +55,12 @@ private:
     void audioLoop();
     void logStats(int64_t now, bool final);
     void writeSummary(HRESULT finHr, double finMs);
+    // false while `qpc` lies in a pause; otherwise *shift = the paused QPC ticks before it (taken off the timeline)
+    bool liveAt(int64_t qpc, int64_t* shift) const;
 
     Config cfg_;
     RecordOptions opt_;
+    AudioFile audioFile_ = AudioFile::M4a;   // audio only
     std::unique_ptr<VideoSource> video_;
     std::unique_ptr<Writer> writer_;
     std::thread vt_;
@@ -62,6 +73,9 @@ private:
     std::string autoStop_;
     std::mutex shotsMu_;
     std::string shots_;   // JSON objects separated by commas
+    mutable std::mutex pauseMu_;
+    std::vector<std::pair<int64_t, int64_t>> pauses_;   // [from, to) in QPC; to = INT64_MAX while paused
+    std::atomic<bool> pausedNow_{false};
     std::string summary_;
     bool lastOk_ = false;
     bool patched_ = true;

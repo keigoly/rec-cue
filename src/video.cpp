@@ -55,9 +55,44 @@ std::string explain(HRESULT hr) {
     }
 }
 
+// The monitor behind each desktop (\\.\DISPLAY1 -> its EDID name and how it is connected), from the display
+// configuration. Monitors it does not list keep an empty name.
+void nameMonitors(std::vector<MonitorInfo>& mons) {
+    UINT32 np = 0, nm = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) != ERROR_SUCCESS) return;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(np);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(nm);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, paths.data(), &nm, modes.data(), nullptr) != ERROR_SUCCESS) return;
+    std::vector<bool> named(mons.size(), false);   // a built-in panel's name may be empty, so it is not the test
+    for (UINT32 i = 0; i < np; ++i) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME src{};
+        src.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        src.header.size = sizeof(src);
+        src.header.adapterId = paths[i].sourceInfo.adapterId;
+        src.header.id = paths[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&src.header) != ERROR_SUCCESS) continue;
+        DISPLAYCONFIG_TARGET_DEVICE_NAME tgt{};
+        tgt.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        tgt.header.size = sizeof(tgt);
+        tgt.header.adapterId = paths[i].targetInfo.adapterId;
+        tgt.header.id = paths[i].targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&tgt.header) != ERROR_SUCCESS) continue;
+        const auto t = tgt.outputTechnology;
+        for (size_t k = 0; k < mons.size(); ++k) {
+            MonitorInfo& m = mons[k];
+            if (m.device != src.viewGdiDeviceName || named[k]) continue;   // a cloned desktop keeps the first
+            named[k] = true;
+            m.name = tgt.monitorFriendlyDeviceName;
+            m.internal = t == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL || t == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS ||
+                         t == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED ||
+                         t == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED;
+        }
+    }
+}
+
 }  // namespace
 
-std::vector<MonitorInfo> listMonitors() {
+std::vector<MonitorInfo> listMonitors(bool names) {
     std::vector<MonitorInfo> out;
     int i = 0;
     for (auto& r : enumOutputs()) {
@@ -69,6 +104,7 @@ std::vector<MonitorInfo> listMonitors() {
         m.primary = r.primary;
         out.push_back(m);
     }
+    if (names) nameMonitors(out);
     return out;
 }
 

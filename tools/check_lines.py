@@ -16,7 +16,7 @@ import unicodedata
 
 SCENES = ["start", "back", "talk", "tip", "check", "check_mic", "check_sys", "check_quiet", "check_end", "starting",
           "rec", "rec_on", "audio", "audio_on", "shot", "shot_idle", "warn_screen", "warn_sys", "warn_mic", "warn_nosys",
-          "recover", "saving", "saved", "fail_start", "fail_save", "fail_shot", "pin_on", "pin_off"]
+          "recover", "saving", "saved", "fail_start", "fail_save", "fail_shot", "pin_on", "pin_off", "pause", "resume"]
 TAGS = {"early", "morning", "noon", "afternoon", "evening", "night", "late",
         "sun", "mon", "tue", "wed", "thu", "fri", "sat", "weekday", "weekend",
         "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",

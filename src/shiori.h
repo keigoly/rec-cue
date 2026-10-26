@@ -19,6 +19,7 @@ enum class Scene {
     WarnScreen, WarnSys, WarnMic, WarnNoSys, Recover,   // the recording needs attention / is fine again
     Saving, Saved, FailStart, FailSave, FailShot,
     PinOn, PinOff,
+    Pause, Resume,                                      // the recording is paused / goes on
     Count
 };
 

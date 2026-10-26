@@ -157,6 +157,11 @@ bool Recorder::start(const Config& c, const RecordOptions& o, std::wstring* err)
         std::lock_guard<std::mutex> lk(shotsMu_);
         shots_.clear();
     }
+    {
+        std::lock_guard<std::mutex> lk(pauseMu_);
+        pauses_.clear();
+        pausedNow_ = false;
+    }
     summary_.clear();
     lastOk_ = false;
     ticks_ = lateTicks_ = 0;
@@ -167,10 +172,14 @@ bool Recorder::start(const Config& c, const RecordOptions& o, std::wstring* err)
                                        o.testPattern ? "true" : "false", o.audioOnly ? "true" : "false", o.maxSeconds) +
                                    systemJson());
 
+    audioFile_ = audioFileOf(c.audioFormat);
     if (!o.outPath.empty()) {
         path_ = o.outPath;
+        const size_t dot = path_.find_last_of(L'.');
+        const std::wstring ext = dot == std::wstring::npos ? L"" : lower(path_.substr(dot));
+        if (ext == L".mp3" || ext == L".wav" || ext == L".m4a") audioFile_ = audioFileOf(ext);   // the name decides
     } else {
-        path_ = c.resolvedOutDir() + L"\\" + c.namePrefix + L" " + stamp() + (o.audioOnly ? L".m4a" : L".mp4");
+        path_ = c.resolvedOutDir() + L"\\" + c.namePrefix + L" " + stamp() + (o.audioOnly ? audioFileExt(audioFile_) : L".mp4");
     }
     const std::wstring dir = parentOf(path_);
     if (!ensureDir(dir)) {
@@ -225,6 +234,7 @@ bool Recorder::start(const Config& c, const RecordOptions& o, std::wstring* err)
     wp.fragmented = c.container == L"fmp4";
     wp.hardware = c.hwEncode;
     wp.d3d = true;
+    wp.audioFile = audioFile_;
     hr = writer_->open(wp, video_ ? video_->device() : nullptr, video_ ? video_->context() : nullptr);
     if (FAILED(hr)) {
         audio.stopNow();
@@ -259,10 +269,19 @@ void Recorder::audioLoop() {
     while (!stop_) {
         Sleep(50);
         const int64_t now = qpcNow();
-        const int64_t t = qpcTo100ns(now) - start100_;
-        elapsed100_ = t;
+        int64_t shift = 0;
+        if (liveAt(now, &shift)) {   // the clock stands still while paused
+            const int64_t t = qpcTo100ns(now - shift) - start100_;
+            elapsed100_ = t;
+            if (opt_.maxSeconds > 0 && static_cast<double>(t) >= opt_.maxSeconds * 1e7) break;
+        }
         ticks_++;
-        if (opt_.maxSeconds > 0 && static_cast<double>(t) >= opt_.maxSeconds * 1e7) break;
+        if (writer_->full()) {   // WAV: 4 GB (5 h 47 min) is all a WAVE file can hold
+            std::lock_guard<std::mutex> lk(reasonMu_);
+            autoStop_ = "the WAV file is full (4 GB, about 5 h 47 min)";
+            Log::event("session.wav_full", false, -1, autoStop_);
+            break;
+        }
         if (now >= nextStats) {
             logStats(now, false);
             nextStats += 10 * f;
@@ -315,36 +334,39 @@ void Recorder::videoLoop() {
             maxLateMs_ = std::max(maxLateMs_, qpcMs(now - next));
             next = now;
         }
-        video_->update();
-        ID3D11Texture2D* tex = video_->compose(cfg_.cursor);
-        int64_t t = qpcTo100ns(now) - start100_;
-        if (t <= lastT) t = lastT + 1;
-        lastT = t;
-        HRESULT hr = writer_->writeVideo(tex, t, dur100);
-        if (hr == S_FALSE) {           // pool empty: the encoder is not returning frames
-            if (++dropStreak > cfg_.fps * 5) {
-                std::lock_guard<std::mutex> lk(reasonMu_);
-                autoStop_ = "encoder stalled (no frame accepted for 5 s)";
-                Log::event("session.encoder", false, -1, autoStop_);
-                break;
-            }
-        } else {
-            dropStreak = 0;
-        }
-        if (FAILED(hr)) {
-            if (++failStreak > cfg_.fps * 5) {
-                std::lock_guard<std::mutex> lk(reasonMu_);
-                autoStop_ = "video writes keep failing (" + hrHex(hr) + ")";
-                break;
-            }
-        } else {
-            failStreak = 0;
-        }
-        ticks_++;
-        videoOk_ = video_->capturing();
-        elapsed100_ = t;
         next += interval;
-        if (opt_.maxSeconds > 0 && static_cast<double>(t) >= opt_.maxSeconds * 1e7) break;
+        int64_t shift = 0;
+        if (liveAt(now, &shift)) {   // while paused nothing is taken or written (the desktop image waits in DXGI)
+            video_->update();
+            ID3D11Texture2D* tex = video_->compose(cfg_.cursor);
+            int64_t t = qpcTo100ns(now - shift) - start100_;
+            if (t <= lastT) t = lastT + 1;
+            lastT = t;
+            HRESULT hr = writer_->writeVideo(tex, t, dur100);
+            if (hr == S_FALSE) {           // pool empty: the encoder is not returning frames
+                if (++dropStreak > cfg_.fps * 5) {
+                    std::lock_guard<std::mutex> lk(reasonMu_);
+                    autoStop_ = "encoder stalled (no frame accepted for 5 s)";
+                    Log::event("session.encoder", false, -1, autoStop_);
+                    break;
+                }
+            } else {
+                dropStreak = 0;
+            }
+            if (FAILED(hr)) {
+                if (++failStreak > cfg_.fps * 5) {
+                    std::lock_guard<std::mutex> lk(reasonMu_);
+                    autoStop_ = "video writes keep failing (" + hrHex(hr) + ")";
+                    break;
+                }
+            } else {
+                failStreak = 0;
+            }
+            ticks_++;
+            videoOk_ = video_->capturing();
+            elapsed100_ = t;
+            if (opt_.maxSeconds > 0 && static_cast<double>(t) >= opt_.maxSeconds * 1e7) break;
+        }
         if (now >= nextStats) {
             logStats(now, false);
             nextStats += 10 * f;
@@ -400,7 +422,9 @@ void Recorder::logStats(int64_t now, bool final) {
                 static_cast<unsigned long long>(vs.cursorAway), static_cast<unsigned long long>(vs.cursorShapes));
     }
     Log::line(final ? "stats.final" : "stats",
-              fmt("\"t\":%.1f,\"video\":", static_cast<double>(elapsed100_.load()) / 1e7) + v + ",\"audio\":" +
+              fmt("\"t\":%.1f,\"paused\":%s,\"paused_s\":%.1f,\"video\":", static_cast<double>(elapsed100_.load()) / 1e7,
+                  pausedNow_ ? "true" : "false", pausedSec()) +
+                  v + ",\"audio\":" +
                   audio.windowJson() +
                   fmt(",\"proc\":{\"ws_mb\":%.0f,\"private_mb\":%.0f,\"cpu_pct\":%.1f},\"system\":", ws,
                       static_cast<double>(pmc.PrivateUsage) / 1048576.0, cpuPct) +
@@ -414,6 +438,11 @@ void Recorder::stop() {
     stop_ = true;
     if (vt_.joinable()) vt_.join();
     if (!stopQpc_) stopQpc_ = qpcNow();
+    {   // stopped while paused: that pause ends here (the sound after it is left out anyway)
+        std::lock_guard<std::mutex> lk(pauseMu_);
+        if (!pauses_.empty() && pauses_.back().second == INT64_MAX)
+            pauses_.back().second = std::max(stopQpc_, pauses_.back().first);
+    }
     audio.stopAt(stopQpc_);
     logStats(qpcNow(), true);
     double finMs = 0;
@@ -423,12 +452,77 @@ void Recorder::stop() {
     writer_.reset();
     video_.reset();
     active_ = false;
+    pausedNow_ = false;
     Log::event("session.end", lastOk_, sw.ms(), u8(path_));
 }
 
 void Recorder::noteShot(const std::wstring& path, double atS) {
     std::lock_guard<std::mutex> lk(shotsMu_);
     shots_ += (shots_.empty() ? "" : ",") + std::string("{\"path\":") + json(path) + fmt(",\"at_s\":%.1f}", atS);
+}
+
+bool Recorder::liveAt(int64_t qpc, int64_t* shift) const {
+    std::lock_guard<std::mutex> lk(pauseMu_);
+    int64_t s = 0;
+    for (auto& p : pauses_) {
+        if (qpc < p.first) break;
+        if (qpc < p.second) {
+            *shift = s;
+            return false;
+        }
+        s += p.second - p.first;
+    }
+    *shift = s;
+    return true;
+}
+
+// The video thread looks at the pauses on every frame and the audio mixer runs latency_ms behind, so both cut the
+// same span of the timeline: picture and sound stay together after a resume.
+bool Recorder::pause() {
+    if (!active_ || stop_) return false;
+    const int64_t now = qpcNow();
+    size_t n = 0;
+    {
+        std::lock_guard<std::mutex> lk(pauseMu_);
+        if (pausedNow_) return false;
+        pauses_.push_back({now, INT64_MAX});
+        pausedNow_ = true;
+        n = pauses_.size();
+    }
+    audio.pauseAt(now);
+    Log::event("session.pause", true, -1, fmt("pause=%zu at=%.1fs", n, elapsedSec()));
+    return true;
+}
+
+bool Recorder::resume() {
+    if (!active_ || stop_) return false;
+    const int64_t now = qpcNow();
+    double ms = 0;
+    size_t n = 0;
+    {
+        std::lock_guard<std::mutex> lk(pauseMu_);
+        if (!pausedNow_ || pauses_.empty()) return false;
+        pauses_.back().second = std::max(now, pauses_.back().first);
+        ms = qpcMs(pauses_.back().second - pauses_.back().first);
+        pausedNow_ = false;
+        n = pauses_.size();
+    }
+    audio.resumeAt(now);
+    Log::event("session.resume", true, ms, fmt("pause=%zu at=%.1fs paused_total=%.1fs", n, elapsedSec(), pausedSec()));
+    return true;
+}
+
+double Recorder::pausedSec() const {
+    const int64_t now = qpcNow();
+    std::lock_guard<std::mutex> lk(pauseMu_);
+    int64_t s = 0;
+    for (auto& p : pauses_) s += std::min(p.second, std::max(now, p.first)) - p.first;
+    return qpcMs(s) / 1000.0;
+}
+
+int Recorder::pauses() const {
+    std::lock_guard<std::mutex> lk(pauseMu_);
+    return static_cast<int>(pauses_.size());
 }
 
 void Recorder::writeSummary(HRESULT finHr, double finMs) {
@@ -460,15 +554,17 @@ void Recorder::writeSummary(HRESULT finHr, double finMs) {
     summary_ =
         "{\"sid\":" + json(sid_) + ",\"version\":" + json(std::string(kVersion)) + ",\"path\":" + json(path_) +
         ",\"started\":" + json(startedIso_) + ",\"ended\":" + json(nowIso()) +
-        fmt(",\"ok\":%s,\"audio_only\":%s,\"duration_s\":%.2f,\"file_bytes\":%llu,\"avg_kbps\":%.0f,\"finalize_ms\":%.1f,"
-            "\"finalize_hr\":%s",
-            lastOk_ ? "true" : "false", video_ ? "false" : "true", dur, static_cast<unsigned long long>(bytes),
-            dur > 0 ? static_cast<double>(bytes) * 8.0 / 1000.0 / dur : 0.0, finMs, json(hrHex(finHr)).c_str()) +
+        fmt(",\"ok\":%s,\"audio_only\":%s,\"duration_s\":%.2f,\"paused_s\":%.1f,\"pauses\":%d,\"file_bytes\":%llu,"
+            "\"avg_kbps\":%.0f,\"finalize_ms\":%.1f,\"finalize_hr\":%s",
+            lastOk_ ? "true" : "false", video_ ? "false" : "true", dur, pausedSec(), pauses(),
+            static_cast<unsigned long long>(bytes), dur > 0 ? static_cast<double>(bytes) * 8.0 / 1000.0 / dur : 0.0, finMs,
+            json(hrHex(finHr)).c_str()) +
+        ",\"audio_file\":" + (video_ ? std::string("null") : json(std::string(audioFileName(audioFile_)))) +
         ",\"auto_stop\":" + (reason.empty() ? std::string("null") : json(reason)) +
         ",\"duration_patched\":" + (patched_ ? "true" : "false") + ",\"video\":" + v +
-        fmt(",\"audio\":{\"mixed_s\":%.2f,\"clipped_samples\":%llu,\"written_samples\":%llu,\"sources\":",
-            static_cast<double>(audio.mixedFrames()) / 48000.0, static_cast<unsigned long long>(audio.clipped()),
-            static_cast<unsigned long long>(writer_->audioSamples.load())) +
+        fmt(",\"audio\":{\"mixed_s\":%.2f,\"cut_s\":%.2f,\"clipped_samples\":%llu,\"written_samples\":%llu,\"sources\":",
+            static_cast<double>(audio.mixedFrames()) / 48000.0, static_cast<double>(audio.cutFrames()) / 48000.0,
+            static_cast<unsigned long long>(audio.clipped()), static_cast<unsigned long long>(writer_->audioSamples.load())) +
         audio.summaryJson() + "}" +
         fmt(",\"perf\":{\"ws_peak_mb\":%.0f,\"cpu_avg_pct\":%.1f,\"write_errors\":%llu},\"system_at_end\":", wsPeakMb_,
             cpuN_ ? cpuSum_ / cpuN_ : 0.0, static_cast<unsigned long long>(writer_->writeErrors.load())) +
@@ -495,7 +591,7 @@ std::string verifyFile(const std::wstring& path, bool audioOnly) {
     if (SUCCEEDED(r->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &pv)) && pv.vt == VT_UI8)
         duration = static_cast<double>(pv.uhVal.QuadPart) / 1e7;
     PropVariantClear(&pv);
-    struct S { std::string kind; uint64_t n = 0; int64_t first = -1, last = -1; uint64_t bytes = 0; };
+    struct S { std::string kind; uint64_t n = 0; int64_t first = -1, last = -1; uint64_t bytes = 0; std::vector<int64_t> ts; };
     std::vector<S> st;
     for (DWORD i = 0;; ++i) {
         Com<IMFMediaType> t;
@@ -528,6 +624,7 @@ std::string verifyFile(const std::wstring& path, bool audioOnly) {
             s.n++;
             if (s.first < 0) s.first = ts;
             s.last = ts;
+            s.ts.push_back(ts);
             DWORD len = 0;
             smp->GetTotalLength(&len);
             s.bytes += len;
@@ -541,10 +638,16 @@ std::string verifyFile(const std::wstring& path, bool audioOnly) {
     std::string o = fmt("{\"ok\":%s,\"ms\":%.0f,\"duration_s\":%.2f,\"read_errors\":%llu,\"streams\":[",
                         errors == 0 && hasAudio && (hasVideo || audioOnly) ? "true" : "false", sw.ms(), duration,
                         static_cast<unsigned long long>(errors));
-    for (size_t i = 0; i < st.size(); ++i)
-        o += fmt("%s{\"kind\":\"%s\",\"samples\":%llu,\"first_s\":%.3f,\"last_s\":%.3f,\"kbytes\":%.0f}", i ? "," : "",
-                 st[i].kind.c_str(), static_cast<unsigned long long>(st[i].n), st[i].first / 1e7, st[i].last / 1e7,
-                 static_cast<double>(st[i].bytes) / 1024.0);
+    for (size_t i = 0; i < st.size(); ++i) {
+        // the longest step between two samples: a hole in the timeline (a pause that was not cut out) shows here.
+        // (A comparator of our own: std::less would link libc++'s prebuilt sorts for every type, +85 KB.)
+        std::sort(st[i].ts.begin(), st[i].ts.end(), [](int64_t x, int64_t y) { return x < y; });
+        int64_t gap = 0;
+        for (size_t k = 1; k < st[i].ts.size(); ++k) gap = std::max(gap, st[i].ts[k] - st[i].ts[k - 1]);
+        o += fmt("%s{\"kind\":\"%s\",\"samples\":%llu,\"first_s\":%.3f,\"last_s\":%.3f,\"max_gap_s\":%.3f,\"kbytes\":%.0f}",
+                 i ? "," : "", st[i].kind.c_str(), static_cast<unsigned long long>(st[i].n), st[i].first / 1e7,
+                 st[i].last / 1e7, gap / 1e7, static_cast<double>(st[i].bytes) / 1024.0);
+    }
     return o + "]}";
 }
 
