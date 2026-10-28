@@ -20,13 +20,13 @@ struct Config {
     bool cursor = true;
     std::wstring container = L"fmp4";    // fmp4 (playable after a crash) | mp4
     int latencyMs = 150;
-    std::wstring hotkey = L"Ctrl+Alt+Shift+R";
+    std::wstring hotkey = L"Ctrl+Alt+R";   // three keys, not four (0.4.2)
     bool hwEncode = true;
     bool topmost = false;                // keep the window above other windows (the pin button)
     std::wstring shotDir;                // empty = same folder as the recordings
     bool shotClipboard = true;           // also copy each screenshot to the clipboard
-    std::wstring shotHotkey = L"Ctrl+Alt+Shift+S";
-    std::wstring audioHotkey = L"Ctrl+Alt+Shift+A";   // start / stop recording audio only
+    std::wstring shotHotkey = L"Ctrl+Alt+S";
+    std::wstring audioHotkey = L"Ctrl+Alt+A";   // start / stop recording audio only
     std::wstring githubUrl = L"https://github.com/keigoly/rec-cue";   // the settings menu links
     std::wstring siteUrl = L"https://official.keigoly.jp/";
 

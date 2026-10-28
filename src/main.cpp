@@ -288,9 +288,9 @@ int runLinesCheck(const std::wstring& jsonOut) {
     std::string widest;
     for (size_t k = 0; k < widths.size() && k < 12; ++k) widest += (k ? "," : "") + entry(widths[k].second, widths[k].first);
     SayContext c;
-    c.recKey = L"Ctrl+Alt+Shift+R";
-    c.audioKey = L"Ctrl+Alt+Shift+A";
-    c.shotKey = L"Ctrl+Alt+Shift+S";
+    c.recKey = L"Ctrl+Alt+R";
+    c.audioKey = L"Ctrl+Alt+A";
+    c.shotKey = L"Ctrl+Alt+S";
     constexpr int kPicks = 20000;
     int empty = 0;
     Stopwatch ps;
