@@ -7,14 +7,14 @@
 見本の画面は音量・機器名・フォルダーが作りもの (--ui-snapshot) なので、PC の中身は写らない。
 - icon.png: res/app.ico の 256 px
 - hero.png: 待機中と録画中の窓を並べた見出しの絵 (角は透明)
-- idle / rec / paused / audio / shot / check / warn / saved / talk.png: 各場面の窓 (2 倍・そのまま)
+- idle / rec / paused / audio / shot / check / warn / saved / talk / settings.png: 各場面の窓 (2 倍・そのまま。settings は歯車の設定の画面)
 """
 import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-STATES = ["idle", "rec", "paused", "audio", "shot", "check", "warn", "saved", "talk"]
+STATES = ["idle", "rec", "paused", "audio", "shot", "check", "warn", "saved", "talk", "settings"]
 FONT = "/System/Library/Fonts/ヒラギノ角ゴシック W5.ttc"
 
 

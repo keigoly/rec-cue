@@ -10,7 +10,7 @@ static const char* kDefaultIni =
     "; Rec Cue! の設定 (UTF-8)。; で始まる行はコメントです。\r\n"
     "; 変更は次の録画開始から反映されます。マイクと PC の音声は画面のリストからも選べます。\r\n"
     "\r\n"
-    "; 保存先。空なら「ビデオ\\画面録画」\r\n"
+    "; 保存先。空なら「ビデオ\\画面録画」(歯車の設定の「変更」で選ぶと書き換わる)\r\n"
     "out_dir=\r\n"
     "; ファイル名の先頭 (後ろに 2026-10-20 193001 のような開始時刻が付く)\r\n"
     "name_prefix=Rec Cue\r\n"
@@ -51,7 +51,7 @@ static const char* kDefaultIni =
     "\r\n"
     "; 窓をほかのアプリより手前に固定する (1 / 0)。画面のピンのボタンでも切り替えられます\r\n"
     "topmost=0\r\n"
-    "; スクショ (録る画面と同じ画面。Rec Cue! の窓は写りません) の保存先。空なら録画と同じ場所\r\n"
+    "; スクショ (録る画面と同じ画面。Rec Cue! の窓は写りません) の保存先。空なら録画と同じ場所 (歯車の設定の「変更」で選ぶと書き換わる)\r\n"
     "shot_dir=\r\n"
     "; スクショをクリップボードにもコピーする (1 / 0)\r\n"
     "shot_clipboard=1\r\n"
@@ -60,7 +60,7 @@ static const char* kDefaultIni =
     "; 録音だけ (画面なし・audio_format の形式) の開始と停止のショートカット。none で無効\r\n"
     "audio_hotkey=Ctrl+Alt+A\r\n"
     "\r\n"
-    "; 設定のメニュー (右上の歯車) から開くページ\r\n"
+    "; 歯車の設定の「GitHub」「公式サイト」で開くページ\r\n"
     "github_url=https://github.com/keigoly/rec-cue\r\n"
     "site_url=https://official.keigoly.jp/\r\n";
 

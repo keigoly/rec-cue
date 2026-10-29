@@ -18,12 +18,18 @@ namespace rc {
 // Pause / AudioPause: ❚❚ (▶ while paused) beside the stop button of the screen / the audio-only side.
 // Screen: the row that picks the monitor to record (its field or its small map).
 // AudioFormat: the file of a recording of sound alone (MP3 / WAV / M4A), a chip beside 録音 while nothing records.
-enum class Part { None, Record, Audio, Pin, Shot, Gear, Mic, Sys, Check, Open, Guide, Pause, AudioPause, Screen, AudioFormat };
+// The settings view (the gear) has its own parts: Back, the two save folders (OutDir / ShotDir: the field opens the
+// folder in Explorer, OutChange / ShotChange: 変更 picks another), Logs (ログを取得) and the two links.
+// Pin, Shot, Gear and Guide are in both views.
+enum class Part { None, Record, Audio, Pin, Shot, Gear, Mic, Sys, Check, Open, Guide, Pause, AudioPause, Screen, AudioFormat,
+                  Back, OutDir, OutChange, ShotDir, ShotChange, Logs, Github, Site };
 
 constexpr float kClientW = 480, kClientH = 340;   // client area in DIPs
 
 D2D1_RECT_F partRect(Part p);
-Part hitTest(float x, float y);   // DIPs; the label column of a channel row opens its menu too
+// DIPs; the label column of a channel row opens its menu too (and of a folder row, the folder)
+Part hitTest(float x, float y, bool settings);
+bool inView(Part p, bool settings);   // the part is in the settings view / in the main view
 D2D1_RECT_F guideRect();          // where the SD guide stands (for her tooltip)
 
 // The title bar in the window's own colours (DWM), so the two read as one surface.
@@ -77,6 +83,16 @@ struct UiModel {
     std::wstring recHotkey, shotHotkey, audioHotkey;   // shortcut hints (empty when not registered)
     std::wstring comment;     // what しおり says under the buttons
     Tone commentTone = Tone::Normal;
+    // the settings view (the gear), in place of the deck and the rows
+    bool settings = false;
+    std::wstring outDir;      // where recordings go
+    std::wstring shotDir;     // where screenshots go (empty: with the recordings)
+    struct Key {
+        std::wstring text;    // as set (なし when there is none)
+        bool taken = false;   // another app has it, so it does nothing
+    };
+    Key keys[3];              // record, audio only, screenshot
+    bool logsBusy = false;    // ログを取得 is packing the files
 };
 
 bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p);
@@ -110,7 +126,7 @@ private:
     void drawRecord(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
     void drawAudio(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
     void drawPause(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part p);
-    void drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float x, bool audio);
+    void drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float x, float y, bool audio);
     void drawHint(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float right);
     void drawStatus(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, const D2D1_RECT_F& r);
     void drawChannel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m, Part part,
@@ -126,6 +142,12 @@ private:
     void drawSideLabel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, const wchar_t* title,
                        const wchar_t* sub, const std::wstring& key, bool trailing);
     void drawFormatChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
+    void drawSettings(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
+    void drawSection(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const wchar_t* title, float y);
+    void drawDirRow(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part field, Part change, wchar_t icon,
+                    const wchar_t* label, const std::wstring& path, const wchar_t* unset, float y);
+    void drawKeys(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float y);
+    void drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b);
     void panel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, float radius, UINT32 fill,
                UINT32 border, UINT32 edge);
     void focusRing(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, float radius);
@@ -145,7 +167,7 @@ private:
     Com<IWICImagingFactory> wic_;
     Com<ID2D1HwndRenderTarget> target_;
     Com<IDWriteTextFormat> brand_, timer_, chip_, chipJp_, hint_, status_, label_, field_, db_, dbJp_, path_, badge_,
-        button_, icon_, iconLarge_, iconSmall_, chevron_, counter_, title_, sub_, name_, thumbMic_;
+        button_, icon_, iconLarge_, iconSmall_, chevron_, counter_, title_, sub_, name_, thumbMic_, key_;
     Com<ID2D1Bitmap> guide_[2];   // idle / recording, scaled to the DPI of the target they belong to
     D2D1_SIZE_F guideDip_[2] = {};
     UINT guideDpi_ = 0;

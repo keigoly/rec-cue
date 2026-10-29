@@ -12,6 +12,7 @@
 //   rec-cue.exe --shot <png> [--json-out <file>]        screenshot of the recorded monitor (timing check)
 //   rec-cue.exe --shot-selftest [--json-out <file>]     shows a small test square for a moment and checks that a
 //                                                       window left out of the shot is really missing from it
+//   rec-cue.exe --export-logs <zip> [--json-out <file>] ログを取得 without the window: the ZIP and its counts
 #include "common.h"  // windows.h first
 
 #include <dwmapi.h>
@@ -30,6 +31,7 @@
 #include "audio.h"
 #include "config.h"
 #include "indicator.h"
+#include "logpack.h"
 #include "recorder.h"
 #include "shiori.h"
 #include "shot.h"
@@ -51,7 +53,7 @@ struct Args {
          shotTest = false, audioOnly = false, linesCheck = false, any = false;
     double seconds = 0, pauseAt = 0, pauseFor = 0;
     int fps = 0, dpi = 0;
-    std::wstring out, jsonOut, verifyFile, container, mic, system, testTone, snapshot, shot, at, audioFormat;
+    std::wstring out, jsonOut, verifyFile, container, mic, system, testTone, snapshot, shot, at, audioFormat, exportLogs;
     std::string error;
 };
 
@@ -77,6 +79,7 @@ Args parseArgs() {
         else if (s == L"--shot-selftest") a.shotTest = true;
         else if (s == L"--lines-check") a.linesCheck = true;
         else if (s == L"--shot") val(a.shot);
+        else if (s == L"--export-logs") val(a.exportLogs);
         else if (s == L"--seconds") { std::wstring v; val(v); a.seconds = _wtof(v.c_str()); }
         else if (s == L"--pause-at") { std::wstring v; val(v); a.pauseAt = _wtof(v.c_str()); }
         else if (s == L"--pause-for") { std::wstring v; val(v); a.pauseFor = _wtof(v.c_str()); }
@@ -316,11 +319,36 @@ int runLinesCheck(const std::wstring& jsonOut) {
     return ok ? 0 : 4;
 }
 
+DWORD windowsBuild();
+
+// about.json in the ZIP of ログを取得: what the logs came from.
+std::string aboutJson() {
+    return "{\"app\":\"Rec Cue!\",\"version\":" + json(std::string(kVersion)) +
+           fmt(",\"windows_build\":%lu,\"days\":%d,\"exported_at\":", windowsBuild(), kLogDays) + json(nowIso()) + "}";
+}
+
+std::string packJson(bool ok, const std::wstring& zip, const LogPack& r) {
+    return fmt("{\"ok\":%s,\"files\":%d,\"skipped\":%d,\"bytes\":%llu,\"ms\":%.1f,\"path\":", ok ? "true" : "false", r.files,
+               r.skipped, static_cast<unsigned long long>(r.bytes), r.ms) +
+           json(zip) + ",\"error\":" + json(r.error) + "}";
+}
+
+// --export-logs <zip>: the ZIP that ログを取得 makes, written here (for the tests).
+int runExportLogs(const std::wstring& zip, const std::wstring& jsonOut) {
+    LogPack r;
+    const bool ok = packLogs(zip, kLogDays, aboutJson(), &r);
+    const std::string s = packJson(ok, zip, r);
+    Log::line("logs.cli", "\"result\":" + s);
+    writeText(jsonOut, s);
+    return ok ? 0 : 4;
+}
+
 int runCli(const Args& a) {
     if (!a.error.empty()) {
         writeText(a.jsonOut, "{\"ok\":false,\"error\":" + json(a.error) + "}");
         return 2;
     }
+    if (!a.exportLogs.empty()) return runExportLogs(a.exportLogs, a.jsonOut);
     if (a.shotTest) return runShotSelftest(a.jsonOut);
     if (a.linesCheck) return runLinesCheck(a.jsonOut);
     if (!a.shot.empty()) return runShot(a.shot, a.jsonOut);
@@ -412,6 +440,7 @@ int runCli(const Args& a) {
 
 constexpr UINT WM_APP_STOPPED = WM_APP + 1;
 constexpr UINT WM_APP_SHOT = WM_APP + 2;   // the PNG of a screenshot has been written
+constexpr UINT WM_APP_LOGS = WM_APP + 3;   // the ZIP of ログを取得 has been written
 constexpr UINT_PTR kTimer = 1, kTimerNotice = 2, kTimerFlash = 3, kTimerSplit = 4, kTimerSay = 5, kTimerResume = 6;
 constexpr int kHotkey = 1, kHotkeyShot = 2, kHotkeyAudio = 3;
 constexpr UINT kMenuBase = 1000;
@@ -479,6 +508,13 @@ struct App {
     std::wstring noticeText;
     Part hot = Part::None, pressed = Part::None, focus = Part::Record;
     bool showFocus = false, mouseIn = false;
+    bool settings = false;        // the settings view (the gear) in place of the deck and the rows
+    // ログを取得: the ZIP is written by `packer`
+    std::thread packer;
+    bool packing = false;
+    std::wstring packPath;
+    LogPack packed;
+    HANDLE packDone = nullptr;    // set by the worker when the ZIP is written (exit waits on it with a limit)
     double hold[2] = {-90, -90};   // meter peak hold (dBFS) and when it was last raised
     int64_t holdAt[2] = {0, 0};
 };
@@ -830,6 +866,20 @@ UiModel model() {
     const bool passing = qpcNow() < g.passingUntil;
     m.comment = passing ? g.passing : g.line;
     m.commentTone = passing ? g.passingTone : g.lineTone;
+    m.settings = g.settings;
+    if (g.settings) {   // the folders and the shortcuts in use (while recording: as that recording started)
+        m.outDir = g.cfg.resolvedOutDir();
+        m.shotDir = g.cfg.shotDir.empty() ? L"" : g.cfg.resolvedShotDir();
+        const std::pair<const std::wstring*, bool> keys[3] = {
+            {&g.cfg.hotkey, g.hotkeyOn}, {&g.cfg.audioHotkey, g.audioHotkeyOn}, {&g.cfg.shotHotkey, g.shotHotkeyOn}};
+        for (int i = 0; i < 3; ++i) {
+            UINT mods = 0, vk = 0;
+            const bool set = parseHotkey(*keys[i].first, &mods, &vk);
+            m.keys[i].text = set ? *keys[i].first : L"なし";
+            m.keys[i].taken = set && !keys[i].second;
+        }
+        m.logsBusy = g.packing;
+    }
     return m;
 }
 
@@ -932,7 +982,7 @@ void onShotSaved() {
                    (g.shotClip ? L"し、コピーしました" : L"しました: " + name),
                UiModel::Tone::Good);
     else if (!saved && g.recording)
-        notice(L"スクショを保存できませんでした (設定 → ログを見る)", UiModel::Tone::Bad);
+        notice(L"スクショを保存できませんでした (設定 → ログを取得)", UiModel::Tone::Bad);
     SayContext c = sayContext();
     c.n = g.shots;
     c.clip = g.shotClip;
@@ -1001,9 +1051,12 @@ ThumbView thumbView() {
 
 void syncThumb() { g.thumb.show(thumbView()); }
 
+void showSettings(bool on);
+
 // audio: microphone + PC audio only (MP3 / WAV / M4A), shown in blue; otherwise the screen as well (.mp4), in red.
 void startRecording(bool audio) {
     if (g.recording || g.stopping || g.starting) return;
+    if (g.settings) showSettings(false);   // the deck shows the recording (its time and ■)
     stopCheck();
     std::vector<std::string> warn;
     g.cfg = loadConfig(&warn);
@@ -1089,7 +1142,7 @@ void onStopped() {
                       (g.rec.durationPatched() ? L"" : L" Mac では 0 秒に見える場合あり"),
                   reason.empty() ? UiModel::Tone::Good : UiModel::Tone::Warn);
     else
-        setStatus(L"保存に失敗しました (設定 → ログを見る)", UiModel::Tone::Bad);
+        setStatus(L"保存に失敗しました (設定 → ログを取得)", UiModel::Tone::Bad);
     SayContext c = sayContext();   // しおり reports it until the next moment
     c.shots = g.shots;
     c.sec = g.rec.elapsedSec();
@@ -1204,7 +1257,9 @@ std::wstring menuText(const std::wstring& s) {   // '&' would underline the next
     return o;
 }
 
-bool enabled(Part p) { return partEnabled(phase(), g.recAudio, p); }
+bool enabled(Part p) {
+    return inView(p, g.settings) && partEnabled(phase(), g.recAudio, p) && !(p == Part::Logs && g.packing);
+}
 
 // Opens `menu` under the field of `part` and returns the command picked (0: none).
 UINT menuUnder(HMENU menu, Part part) {
@@ -1292,19 +1347,11 @@ void chooseAudioFormat() {
     g.cfg = loadConfig();
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
-    wchar_t mp3[128], m4a[128];
-    const double mbPerHour = g.cfg.audioKbps * 0.45;   // kbps -> MB per hour
-    swprintf(mp3, 128, L"MP3 — 小さく、どこでも再生できる (%d kbps・1 時間でおよそ %.0f MB)", g.cfg.audioKbps, mbPerHour);
-    swprintf(m4a, 128, L"M4A (AAC) — 同じ大きさなら MP3 より音がよい (%d kbps・1 時間でおよそ %.0f MB)", g.cfg.audioKbps,
-             mbPerHour);
-    const std::pair<const wchar_t*, std::wstring> items[] = {
-        {L"mp3", mp3},
-        {L"wav", L"WAV — 圧縮しない (1 時間でおよそ 690 MB・5 時間 47 分まで)"},
-        {L"m4a", m4a}};
+    const std::pair<const wchar_t*, const wchar_t*> items[] = {{L"mp3", L"MP3"}, {L"wav", L"WAV"}, {L"m4a", L"M4A"}};
     const AudioFile cur = audioFileOf(g.cfg.audioFormat);
     for (size_t i = 0; i < 3; ++i)
         AppendMenuW(menu, MF_STRING | (audioFileOf(items[i].first) == cur ? MF_CHECKED : MF_UNCHECKED), kMenuBase + i,
-                    items[i].second.c_str());
+                    items[i].second);
     const UINT cmd = menuUnder(menu, Part::AudioFormat);
     DestroyMenu(menu);
     if (!IsWindow(g.hwnd)) return;
@@ -1369,24 +1416,6 @@ void onThumb(UINT id) {
     if (id == kThumbStop) stopRecording();
 }
 
-void openConfig() {
-    loadConfig();   // creates the file with its comments when it is missing
-    ShellExecuteW(g.hwnd, L"open", L"notepad.exe", (L"\"" + configPath() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
-}
-
-// Today's log in Notepad (one JSON object per line), or the log folder when there is none yet.
-void openLog() {
-    SYSTEMTIME t;
-    GetLocalTime(&t);
-    wchar_t name[40];
-    swprintf(name, 40, L"\\rec-cue-%04u%02u%02u.log", t.wYear, t.wMonth, t.wDay);
-    const std::wstring f = Log::dir() + name;
-    if (GetFileAttributesW(f.c_str()) != INVALID_FILE_ATTRIBUTES)
-        ShellExecuteW(g.hwnd, L"open", L"notepad.exe", (L"\"" + f + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
-    else
-        ShellExecuteW(g.hwnd, L"open", Log::dir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
 // Only web addresses from the settings file are opened (never a program or a file).
 void openUrl(const std::wstring& url) {
     const std::wstring u = lower(url);
@@ -1403,54 +1432,167 @@ std::wstring keyText(const std::wstring& key, bool registered) {
     return registered ? key : key + L" (ほかのアプリが使用中)";
 }
 
-// The gear: the settings file, the log, the shortcuts, and the links.
-void showSettingsMenu() {
-    enum : UINT { kConfig = 2001, kLog, kGithub, kSite, kAbout };
+void moveTooltips();
+
+// The gear: the settings view in place of the deck and the rows (the header, しおり and the band stay), or back.
+void showSettings(bool on) {
+    if (g.settings == on) return;
+    if (on && !g.recording && !g.starting && !g.stopping) g.cfg = loadConfig();   // as the file is now
+    g.settings = on;
+    g.hot = g.pressed = Part::None;
+    g.focus = on ? Part::Back : Part::Gear;
+    moveTooltips();   // each view has its own tools
+    Log::event("ui.view", true, -1, on ? "settings" : "main");
+    invalidate();
+}
+
+// A save folder in Explorer (made first when it is not there yet).
+void openDir(bool shot) {
+    if (!g.recording && !g.starting && !g.stopping) g.cfg = loadConfig();
+    const std::wstring d = shot ? g.cfg.resolvedShotDir() : g.cfg.resolvedOutDir();
+    ensureDir(d);
+    const auto r = reinterpret_cast<INT_PTR>(ShellExecuteW(g.hwnd, L"open", d.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    Log::event("ui.open_dir", r > 32, -1, std::string(shot ? "shot " : "out ") + u8(d));
+}
+
+// Explorer's own folder picker, opened at `start`. Empty when it was cancelled (hr: ERROR_CANCELLED) or failed.
+std::wstring pickFolder(const wchar_t* title, const std::wstring& start, HRESULT* hr) {
+    Com<IFileOpenDialog> d;
+    *hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, __uuidof(IFileOpenDialog), d.put_void());
+    if (FAILED(*hr)) return {};
+    DWORD o = 0;
+    d->GetOptions(&o);
+    d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+    d->SetTitle(title);
+    Com<IShellItem> at;
+    if (SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, __uuidof(IShellItem), at.put_void())))
+        d->SetFolder(at.get());
+    *hr = d->Show(g.hwnd);
+    if (FAILED(*hr)) return {};
+    Com<IShellItem> r;
+    PWSTR p = nullptr;
+    *hr = d->GetResult(r.put());
+    if (SUCCEEDED(*hr)) *hr = r->GetDisplayName(SIGDN_FILESYSPATH, &p);
+    const std::wstring s = SUCCEEDED(*hr) && p ? p : L"";
+    CoTaskMemFree(p);
+    return s;
+}
+
+// 0 when the folder takes a new file (an empty one, gone as it closes); otherwise why not. A read-only or unreachable
+// place is not kept, so the next recording does not fail to start there.
+DWORD writeError(const std::wstring& dir) {
+    const std::wstring f = dir + (!dir.empty() && dir.back() == L'\\' ? L"" : L"\\") +
+                           wide(fmt(".rec-cue-write-test-%lu-%llx.tmp", GetCurrentProcessId(),
+                                    static_cast<unsigned long long>(qpcNow())));
+    HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return GetLastError();
+    CloseHandle(h);
+    return 0;
+}
+
+bool samePath(std::wstring a, std::wstring b) {
+    for (std::wstring* s : {&a, &b})
+        while (s->size() > 3 && (s->back() == L'\\' || s->back() == L'/')) s->pop_back();
+    return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+}
+
+// 変更: Explorer's folder picker at the folder in use. The folder must take a file before it is kept. The default
+// place is kept as an empty value (out_dir: Videos\画面録画, shot_dir: with the recordings), so it goes on following
+// that place. Used from the next recording / screenshot on.
+void chooseDir(bool shot) {
+    const Part part = shot ? Part::ShotChange : Part::OutChange;
+    if (!enabled(part)) return;
     g.cfg = loadConfig();
-    HMENU m = CreatePopupMenu(), keys = CreatePopupMenu();
-    if (!m || !keys) {
-        if (m) DestroyMenu(m);
-        if (keys) DestroyMenu(keys);
-        return;
-    }
-    AppendMenuW(keys, MF_STRING, kConfig, (L"録画の開始と停止\t" + keyText(g.cfg.hotkey, g.hotkeyOn)).c_str());
-    AppendMenuW(keys, MF_STRING, kConfig, (L"録音の開始と停止\t" + keyText(g.cfg.audioHotkey, g.audioHotkeyOn)).c_str());
-    AppendMenuW(keys, MF_STRING, kConfig, (L"スクショ\t" + keyText(g.cfg.shotHotkey, g.shotHotkeyOn)).c_str());
-    AppendMenuW(keys, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(keys, MF_STRING, kConfig, L"設定ファイルで変える");
-    AppendMenuW(m, MF_STRING, kConfig, L"設定ファイルを開く");
-    AppendMenuW(m, MF_STRING, kLog, L"ログを見る");
-    AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(keys), L"ショートカットキー");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, kGithub, L"GitHub を開く");
-    AppendMenuW(m, MF_STRING, kSite, L"公式サイトを開く");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, kAbout, L"Rec Cue! について");
-    const D2D1_RECT_F f = partRect(Part::Gear);
-    RECT ex{S(static_cast<int>(f.left)), S(static_cast<int>(f.top)), S(static_cast<int>(f.right)), S(static_cast<int>(f.bottom))};
-    MapWindowPoints(g.hwnd, nullptr, reinterpret_cast<POINT*>(&ex), 2);
-    TPMPARAMS tp{sizeof(tp), ex};
+    const std::wstring cur = shot ? g.cfg.resolvedShotDir() : g.cfg.resolvedOutDir();
+    ensureDir(cur);   // so that the picker opens in it
     g.pressed = Part::None;
     invalidate();
-    const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_VERTICAL,
-                                                        ex.right, ex.bottom + S(2), g.hwnd, &tp));
-    DestroyMenu(m);   // and the submenu with it
+    const char* kind = shot ? "shot" : "out";
+    HRESULT hr = S_OK;
+    Stopwatch sw;
+    const std::wstring dir = pickFolder(shot ? L"スクショの保存先を選ぶ" : L"録画と録音の保存先を選ぶ", cur, &hr);
+    const double ms = sw.ms();
     if (!IsWindow(g.hwnd)) return;
-    switch (cmd) {
-        case kConfig: openConfig(); break;
-        case kLog: openLog(); break;
-        case kGithub: openUrl(g.cfg.githubUrl); break;
-        case kSite: openUrl(g.cfg.siteUrl); break;
-        case kAbout: {
-            const std::wstring s = L"Rec Cue! " + wide(std::string(kVersion)) +
-                                   L"\n\n画面とマイクと PC の音声を 1 本の MP4 に、音声だけなら MP3・WAV・M4A に録る軽い録画アプリです。"
-                                   L"\n\n案内役: 湊 しおり (みなと しおり)\n設定とログ: " + appDir();
-            MessageBoxW(g.hwnd, s.c_str(), L"Rec Cue! について", MB_ICONINFORMATION | MB_OK);
-            break;
+    if (dir.empty()) {
+        const bool cancelled = hr == HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        Log::event("ui.folder", cancelled, ms, fmt("kind=%s %s", kind, cancelled ? "cancelled" : "no folder"),
+                   cancelled ? S_OK : hr);
+        invalidate();
+        return;
+    }
+    if (!enabled(part)) {   // a recording started (shortcut, taskbar) while the picker was open: keep the folder
+        Log::event("ui.folder", false, ms, fmt("kind=%s a recording started meanwhile; not changed", kind));
+        invalidate();
+        return;
+    }
+    if (const DWORD e = writeError(dir)) {
+        Log::event("ui.folder", false, ms, fmt("kind=%s cannot write in ", kind) + u8(dir), HRESULT_FROM_WIN32(e));
+        passText(L"このフォルダーには保存できません。ほかの場所をお選びください。", 6000, UiModel::Tone::Bad);
+        return;
+    }
+    const std::wstring base = shot ? g.cfg.resolvedOutDir() : Config().resolvedOutDir();
+    const std::wstring value = samePath(dir, base) ? L"" : dir;
+    const bool ok = saveConfigValue(shot ? L"shot_dir" : L"out_dir", value);
+    g.cfg = loadConfig();
+    if (!g.recording && !g.starting && !g.stopping) refreshPath();   // the main view's 保存先 too
+    Log::event("ui.folder", ok, ms, fmt("kind=%s default=%s ", kind, value.empty() ? "true" : "false") + u8(dir));
+    if (!ok) passText(L"保存先を書き込めませんでした。", 6000, UiModel::Tone::Bad);
+    else passText(shot ? L"スクショの保存先を変えました。" : L"保存先を変えました。次の録画から使います。", 4000,
+                  UiModel::Tone::Good);
+    invalidate();
+}
+
+// ログを取得: the logs and records of the last week in one ZIP in Downloads, to attach as it is. Written on a worker
+// (Downloads may be a redirected share that answers slowly); WM_APP_LOGS then shows it selected in Explorer.
+void exportLogs() {
+    if (g.packing) return;
+    if (g.packer.joinable()) g.packer.join();
+    g.packing = true;
+    const std::wstring dir = downloadsDir();
+    ensureDir(dir);
+    g.packPath = uniquePath(dir, L"Rec Cue ログ " + stamp(), L".zip");
+    if (!g.packDone) g.packDone = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    if (g.packDone) ResetEvent(g.packDone);
+    Log::event("logs.export", true, -1, "start " + u8(g.packPath));
+    g.packer = std::thread([about = aboutJson()] {
+        packLogs(g.packPath, kLogDays, about, &g.packed);
+        if (g.packDone) SetEvent(g.packDone);
+        PostMessageW(g.hwnd, WM_APP_LOGS, 0, 0);
+    });
+    invalidate();
+}
+
+// The ZIP is there: Explorer opens Downloads with it selected (to drag into a mail, or copy).
+void onLogsPacked() {
+    if (g.packer.joinable()) g.packer.join();   // also makes the worker's results visible here
+    g.packing = false;
+    const bool ok = g.packed.error.empty();
+    Log::event("logs.export", ok, g.packed.ms, packJson(ok, g.packPath, g.packed));
+    if (ok) {
+        HRESULT hr = E_FAIL;
+        if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(g.packPath.c_str())) {
+            hr = SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+            ILFree(pidl);
         }
-        default: break;
+        Log::event("logs.show", SUCCEEDED(hr), -1, "", hr);
+        passText(L"ログを ZIP にまとめ、ダウンロードに置きました。", 5000, UiModel::Tone::Good);
+    } else {
+        passText(L"ログをまとめられませんでした。", 8000, UiModel::Tone::Bad);
     }
     invalidate();
+}
+
+// Like the screenshot's PNG: a ZIP that cannot be finished must not keep a closed Rec Cue! alive. false: still
+// writing after `ms`.
+bool waitPacker(DWORD ms) {
+    if (!g.packer.joinable()) return true;
+    if (g.packDone && WaitForSingleObject(g.packDone, ms) != WAIT_OBJECT_0) {
+        Log::event("logs.wait", false, ms, "the log ZIP is still being written; not waiting any longer");
+        return false;
+    }
+    g.packer.join();
+    return true;
 }
 
 // A click on her or her bubble: something else that fits the moment (while idle a tip or a word of hers).
@@ -1478,7 +1620,15 @@ void activate(Part p) {
     switch (p) {
         case Part::Record: toggleRecord(); break;
         case Part::Audio: toggleAudio(); break;
-        case Part::Gear: showSettingsMenu(); break;
+        case Part::Gear: showSettings(!g.settings); break;
+        case Part::Back: showSettings(false); break;
+        case Part::OutDir: openDir(false); break;
+        case Part::ShotDir: openDir(true); break;
+        case Part::OutChange: chooseDir(false); break;
+        case Part::ShotChange: chooseDir(true); break;
+        case Part::Logs: exportLogs(); break;
+        case Part::Github: openUrl(g.cfg.githubUrl); break;
+        case Part::Site: openUrl(g.cfg.siteUrl); break;
         case Part::Mic: chooseDevice(false); break;
         case Part::Sys: chooseDevice(true); break;
         case Part::Screen: chooseScreen(); break;
@@ -1508,10 +1658,13 @@ void activate(Part p) {
 }
 
 void moveFocus(int dir) {
-    static const Part order[] = {Part::Record, Part::Pause, Part::AudioPause, Part::Audio, Part::AudioFormat,
-                                 Part::Pin,    Part::Shot,  Part::Gear,       Part::Screen, Part::Mic,
-                                 Part::Sys,    Part::Check, Part::Open};
-    constexpr int n = 13;
+    static const Part mainOrder[] = {Part::Record, Part::Pause, Part::AudioPause, Part::Audio, Part::AudioFormat,
+                                     Part::Pin,    Part::Shot,  Part::Gear,       Part::Screen, Part::Mic,
+                                     Part::Sys,    Part::Check, Part::Open};
+    static const Part setOrder[] = {Part::Back,    Part::Pin,        Part::Shot, Part::Gear,   Part::OutDir, Part::OutChange,
+                                    Part::ShotDir, Part::ShotChange, Part::Logs, Part::Github, Part::Site};
+    const Part* order = g.settings ? setOrder : mainOrder;
+    const int n = g.settings ? 11 : 13;
     int i = 0;
     while (i < n && order[i] != g.focus) ++i;
     for (int step = 0; step < n; ++step) {
@@ -1526,7 +1679,7 @@ void moveFocus(int dir) {
 }
 
 Part enabledHit(LPARAM lp) {
-    const Part p = hitTest(dip(static_cast<short>(LOWORD(lp))), dip(static_cast<short>(HIWORD(lp))));
+    const Part p = hitTest(dip(static_cast<short>(LOWORD(lp))), dip(static_cast<short>(HIWORD(lp))), g.settings);
     return enabled(p) ? p : Part::None;
 }
 
@@ -1564,10 +1717,14 @@ void addSystemMenu() {
 
 // ---- tooltips: the tools that are only an icon, and the guide's name
 constexpr UINT_PTR kTipGuide = 100;
-const Part kTipParts[] = {Part::Record, Part::Audio, Part::Pin, Part::Shot, Part::Gear, Part::Pause, Part::AudioPause,
-                          Part::AudioFormat};
+const Part kTipParts[] = {Part::Record,  Part::Audio,      Part::Pin,     Part::Shot,       Part::Gear,
+                          Part::Pause,   Part::AudioPause, Part::AudioFormat, Part::Back,   Part::OutDir,
+                          Part::OutChange, Part::ShotDir,  Part::ShotChange, Part::Logs,    Part::Github,
+                          Part::Site};
 
+// A tool of the other view has no room (moveTooltips when the view changes), so their rectangles never compete.
 RECT tipRect(UINT_PTR id) {
+    if (id != kTipGuide && !inView(static_cast<Part>(id), g.settings)) return {0, 0, 0, 0};
     const D2D1_RECT_F f = id == kTipGuide ? guideRect() : partRect(static_cast<Part>(id));
     return {S(static_cast<int>(f.left)), S(static_cast<int>(f.top)), S(static_cast<int>(f.right)), S(static_cast<int>(f.bottom))};
 }
@@ -1583,7 +1740,20 @@ std::wstring tipText(UINT_PTR id) {
             return g.recording && g.recAudio ? L"録音を止めて保存 (" + aud + L")" : L"録音だけ: マイクと PC の音声 (" + aud + L")";
         case Part::Pin: return g.topmost ? L"最前面の固定をやめる" : L"最前面に固定する";
         case Part::Shot: return L"スクショ (" + shot + L") — Rec Cue! の窓は写りません";
-        case Part::Gear: return L"設定・ログ・ショートカットキー・リンク";
+        case Part::Gear: return g.settings ? L"設定を閉じる" : L"設定 — 保存先・ショートカットキー・ログ・リンク";
+        case Part::Back: return L"戻る (Esc)";
+        case Part::OutDir:
+        case Part::ShotDir: return L"エクスプローラーで開く";
+        case Part::OutChange:
+        case Part::ShotChange:
+            if (!enabled(static_cast<Part>(id))) return L"録画中・録音中は変えられません";
+            return static_cast<Part>(id) == Part::OutChange
+                       ? L"録画と録音の保存先を、エクスプローラーの画面で選ぶ"
+                       : L"スクショの保存先を選ぶ — 録画と同じフォルダーを選ぶと「録画と同じ場所」に戻ります";
+        case Part::Logs:
+            return g.packing ? L"ログをまとめています" : L"ログを取得 — 直近 7 日のログと録画ごとの記録を ZIP にまとめ、ダウンロードに置きます";
+        case Part::Github: return g.cfg.githubUrl;
+        case Part::Site: return g.cfg.siteUrl;
         case Part::AudioFormat:   // only while nothing records (it is not shown otherwise)
             if (!enabled(Part::AudioFormat)) return L"";
             return std::wstring(L"録音の形式: ") + audioFormatLabel(audioFileOf(g.cfg.audioFormat)) +
@@ -1792,6 +1962,22 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     apaused.status = paused.status;
     line(apaused, Scene::Pause, ca);
     shot(L"audio-paused", apaused);
+    UiModel set = idle;   // the settings view (the gear): the save folders, the shortcuts, the log and the links
+    set.settings = true;
+    set.outDir = dir;
+    set.keys[0] = {L"Ctrl+Alt+R", false};
+    set.keys[1] = {L"Ctrl+Alt+A", false};
+    set.keys[2] = {L"Ctrl+Alt+S", false};
+    shot(L"settings", set);
+    UiModel setRec = set;   // ... while recording: 変更 waits, the chip and the time beside 設定; the pointer on a folder
+    setRec.phase = P::Recording;
+    setRec.timer = rec.timer;
+    setRec.shotDir = L"C:\\Users\\you\\Pictures\\スクショ";
+    setRec.hot = Part::ShotDir;
+    setRec.keys[2].taken = true;   // as if another app had the screenshot key
+    setRec.comment = rec.comment;
+    setRec.commentTone = rec.commentTone;
+    shot(L"settings-rec", setRec);
     // the buttons under the taskbar thumbnail, 4x the 16 px they are at 100%, for the dark and the light taskbar
     const std::pair<ThumbGlyph, const wchar_t*> glyphs[] = {{ThumbGlyph::Record, L"record"}, {ThumbGlyph::Audio, L"audio"},
                                                             {ThumbGlyph::Pause, L"pause"},   {ThumbGlyph::Resume, L"resume"},
@@ -1928,6 +2114,10 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 moveFocus(GetKeyState(VK_SHIFT) < 0 ? -1 : 1);
                 return 0;
             }
+            if (wp == VK_ESCAPE && g.settings) {
+                showSettings(false);
+                return 0;
+            }
             if (wp == VK_SPACE || wp == VK_RETURN ||
                 ((wp == VK_DOWN || wp == VK_F4) && (g.focus == Part::Mic || g.focus == Part::Sys || g.focus == Part::Screen))) {
                 g.showFocus = true;
@@ -1968,6 +2158,9 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_APP_SHOT:
             onShotSaved();
+            return 0;
+        case WM_APP_LOGS:
+            onLogsPacked();
             return 0;
         case WM_DPICHANGED: {
             g.dpi = HIWORD(wp);
@@ -2018,6 +2211,7 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 g.recording = false;
                 g.stopping = false;
                 waitShooter(3000);   // the recording comes first; a stuck screenshot must not hold up the session end
+                waitPacker(3000);
                 Log::event("ui.endsession", true, -1, "saved before the session ended");
                 ShutdownBlockReasonDestroy(h);
             }
@@ -2120,8 +2314,8 @@ int runUi(HINSTANCE inst, int show) {
     }
     if (g.stopper.joinable()) g.stopper.join();
     if (g.rec.active()) g.rec.stop();
-    if (!waitShooter(3000)) {
-        // The worker is stuck in file I/O: end the process here (ExitProcess stops that thread first and runs no
+    if (!waitShooter(3000) || !waitPacker(3000)) {
+        // A worker is stuck in file I/O: end the process here (ExitProcess stops that thread first and runs no
         // destructors that it could still touch), so nothing stays behind without a window.
         if (mutex) CloseHandle(mutex);
         ExitProcess(0);

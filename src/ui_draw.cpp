@@ -71,12 +71,26 @@ constexpr D2D1_RECT_F kOpenBox{210, 266, 400, 296};
 constexpr D2D1_RECT_F kGuideBox{402, 240, 478, 338};   // the SD guide stands here, feet on the bottom edge
 constexpr float kGuideH = 96;
 constexpr D2D1_RECT_F kBubble{kL, 304, 394, 332};      // what しおり says, under the buttons, pointing at her
+// the settings view (the gear): the same header with ← and 設定, then a section each for the save folders, the
+// shortcuts, and the log and the links; しおり and her bubble stay where they are
+constexpr D2D1_RECT_F kBackBox{kL, 8, 42, 36};
+constexpr D2D1_RECT_F kSetTitleBox{50, 8, 96, 36};
+constexpr float kSetChipX = 98, kSetChipY = 12;        // REC / AUDIO / PAUSE and the time, while a recording goes on
+constexpr float kSecDirs = 44, kOutY = 62, kShotDirY = 96;   // 保存先: 録画・録音 / スクショ
+constexpr float kDirR = 398, kChangeL = 404;           // the folder's field (from kFieldL) and 変更
+constexpr float kSecKeys = 138, kKeysY = 156, kKeysH = 26;   // ショートカットキー
+constexpr float kSecLog = 196;                         // ログと情報
+constexpr D2D1_RECT_F kLogsBox{kL, 214, 154, 244};
+constexpr D2D1_RECT_F kGithubBox{160, 214, 276, 244};
+constexpr D2D1_RECT_F kSiteBox{282, 214, 396, 244};
+constexpr D2D1_RECT_F kAboutBox{kL, 254, 396, 278};    // the version (what 「Rec Cue! について」 used to show)
 
 // Segoe Fluent Icons / Segoe MDL2 Assets
 constexpr wchar_t kIconMic = 0xE720, kIconSpeakers = 0xE767, kIconPulse = 0xE9D9, kIconStop = 0xE71A,
                   kIconFolderOpen = 0xE838, kIconSettings = 0xE713, kIconChevron = 0xE70D, kIconFolder = 0xE8B7,
                   kIconPin = 0xE718, kIconPinFill = 0xE842, kIconCamera = 0xE722, kIconWarn = 0xE7BA,
-                  kIconCheck = 0xE73E, kIconMonitor = 0xE7F4;
+                  kIconCheck = 0xE73E, kIconMonitor = 0xE7F4, kIconBack = 0xE72B, kIconVideo = 0xE714,
+                  kIconKeyboard = 0xE765, kIconDownload = 0xE896, kIconOpenIn = 0xE8A7, kIconInfo = 0xE946;
 
 D2D1_RECT_F inset(const D2D1_RECT_F& r, float d) { return {r.left + d, r.top + d, r.right - d, r.bottom - d}; }
 D2D1_RECT_F fieldRect(float y) { return {kFieldL, y, kFieldR, y + kRowH}; }
@@ -97,6 +111,9 @@ bool hasExtension(const std::wstring& p) {
     return dot != std::wstring::npos && (sep == std::wstring::npos || dot > sep);
 }
 
+// The part can be pressed now (ログを取得 waits while it packs the files).
+bool usable(const UiModel& m, Part p) { return partEnabled(m.phase, m.audioOnly, p) && !(p == Part::Logs && m.logsBusy); }
+
 }  // namespace
 
 D2D1_RECT_F partRect(Part p) {
@@ -115,6 +132,14 @@ D2D1_RECT_F partRect(Part p) {
         case Part::AudioPause: return circleRect(kAudPause, kAudPauseR);
         case Part::Screen: return fieldRect(kScreenY);
         case Part::AudioFormat: return kFormatBox;
+        case Part::Back: return kBackBox;
+        case Part::OutDir: return {kFieldL, kOutY, kDirR, kOutY + kRowH};
+        case Part::OutChange: return {kChangeL, kOutY, kR, kOutY + kRowH};
+        case Part::ShotDir: return {kFieldL, kShotDirY, kDirR, kShotDirY + kRowH};
+        case Part::ShotChange: return {kChangeL, kShotDirY, kR, kShotDirY + kRowH};
+        case Part::Logs: return kLogsBox;
+        case Part::Github: return kGithubBox;
+        case Part::Site: return kSiteBox;
         case Part::None: break;
     }
     return {0, 0, 0, 0};
@@ -122,13 +147,41 @@ D2D1_RECT_F partRect(Part p) {
 
 D2D1_RECT_F guideRect() { return kGuideBox; }
 
-Part hitTest(float x, float y) {
+bool inView(Part p, bool settings) {
+    switch (p) {
+        case Part::Pin:
+        case Part::Shot:
+        case Part::Gear:
+        case Part::Guide: return true;
+        case Part::Back:
+        case Part::OutDir:
+        case Part::OutChange:
+        case Part::ShotDir:
+        case Part::ShotChange:
+        case Part::Logs:
+        case Part::Github:
+        case Part::Site: return settings;
+        case Part::None: return false;
+        default: return !settings;
+    }
+}
+
+Part hitTest(float x, float y, bool settings) {
+    auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
+    if (settings) {
+        for (Part p : {Part::Back, Part::Pin, Part::Shot, Part::Gear, Part::OutChange, Part::ShotChange, Part::Logs,
+                       Part::Github, Part::Site})
+            if (in(partRect(p))) return p;
+        if (in({kL, kOutY, kDirR, kOutY + kRowH})) return Part::OutDir;
+        if (in({kL, kShotDirY, kDirR, kShotDirY + kRowH})) return Part::ShotDir;
+        if (in(kGuideBox) || in(kBubble)) return Part::Guide;
+        return Part::None;
+    }
     auto inCircle = [&](D2D1_POINT_2F c, float r) { return (x - c.x) * (x - c.x) + (y - c.y) * (y - c.y) <= r * r; };
     if (inCircle(kRec, kRecR + 2)) return Part::Record;
     if (inCircle(kAud, kAudR + 2)) return Part::Audio;
     if (inCircle(kPause, kPauseR + 2)) return Part::Pause;   // only while recording (main.cpp keeps the enabled ones)
     if (inCircle(kAudPause, kAudPauseR + 2)) return Part::AudioPause;
-    auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
     for (Part p : {Part::Pin, Part::Shot, Part::Gear, Part::Check, Part::Open, Part::AudioFormat})
         if (in(partRect(p))) return p;
     if (in({kL, kScreenY, kR, kScreenY + kRowH})) return Part::Screen;   // its map opens the menu too
@@ -148,10 +201,18 @@ bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p) {
         case Part::Sys:
         case Part::Screen:
         case Part::AudioFormat:
+        case Part::OutChange:
+        case Part::ShotChange:
         case Part::Check: return ph == P::Idle || ph == P::Checking;
         case Part::Pin:
         case Part::Shot:
         case Part::Gear:
+        case Part::Back:
+        case Part::OutDir:
+        case Part::ShotDir:
+        case Part::Logs:
+        case Part::Github:
+        case Part::Site:
         case Part::Open: return true;
         case Part::Guide: return ph != P::Starting && ph != P::Saving;
         case Part::Pause: return ph == P::Recording && !audioOnly;
@@ -218,8 +279,10 @@ bool UiPainter::init() {
     sub_ = format(text, 10.5f, DWRITE_FONT_WEIGHT_NORMAL);
     name_ = format(text, 10.5f, DWRITE_FONT_WEIGHT_BOLD);
     thumbMic_ = format(icons, 8, DWRITE_FONT_WEIGHT_NORMAL);   // in a 16 DIP taskbar button
+    key_ = format(mono, 10.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD);   // a shortcut in its key cap (the settings view)
     for (auto* f : {&brand_, &timer_, &chip_, &chipJp_, &hint_, &status_, &label_, &field_, &db_, &dbJp_, &path_, &badge_,
-                    &button_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &title_, &sub_, &name_, &thumbMic_})
+                    &button_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &title_, &sub_, &name_, &thumbMic_,
+                    &key_})
         if (!*f) return false;
     Com<IDWriteInlineObject> sign;
     if (SUCCEEDED(dw_->CreateEllipsisTrimmingSign(path_.get(), sign.put()))) {
@@ -228,7 +291,7 @@ bool UiPainter::init() {
     }
     hint_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
     db_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-    for (auto* f : {&chip_, &chipJp_, &dbJp_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &thumbMic_})
+    for (auto* f : {&chip_, &chipJp_, &dbJp_, &icon_, &iconLarge_, &iconSmall_, &chevron_, &counter_, &thumbMic_, &key_})
         (*f)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     return true;
 }
@@ -550,23 +613,39 @@ void UiPainter::draw(ID2D1RenderTarget* rt, const UiModel& m) {
         return;
     const bool rec = m.phase == P::Recording;
 
-    // header: the name, then three icon tools on the right (pin, screenshot, settings)
+    // header: the name (in the settings view ← and 設定), then three icon tools on the right (pin, screenshot, settings)
     b->SetColor(C(kText));
-    text(rt, b.get(), L"Rec Cue!", brand_.get(), kBrandBox, 0.2f);
+    if (m.settings) {
+        drawIconButton(rt, b.get(), m, Part::Back, kIconBack, Look::Plain, 0);
+        b->SetColor(C(kText));
+        text(rt, b.get(), L"設定", brand_.get(), kSetTitleBox, 0.2f);
+        if (rec) {   // a recording goes on meanwhile: its chip and its time beside the title
+            drawChip(rt, b.get(), m, kSetChipX, kSetChipY, m.audioOnly);
+            const float x = kSetChipX + (m.paused || m.audioOnly ? 66.f : 52.f) + 8;
+            b->SetColor(C(m.paused ? kText3 : kText2));
+            text(rt, b.get(), m.timer, path_.get(), {x, 8, x + 70, 36});
+        }
+    } else {
+        text(rt, b.get(), L"Rec Cue!", brand_.get(), kBrandBox, 0.2f);
+    }
     drawIconButton(rt, b.get(), m, Part::Pin, m.topmost ? kIconPinFill : kIconPin, m.topmost ? Look::Accent : Look::Plain, 0);
     drawIconButton(rt, b.get(), m, Part::Shot, kIconCamera, m.shotFlash ? Look::Flash : Look::Plain, rec ? m.shots : 0);
-    drawIconButton(rt, b.get(), m, Part::Gear, kIconSettings, Look::Plain, 0);
+    drawIconButton(rt, b.get(), m, Part::Gear, kIconSettings, m.settings ? Look::Accent : Look::Plain, 0);
 
-    drawDeck(rt, b.get(), m);
-    drawScreen(rt, b.get(), fx.get(), m);
-    drawChannel(rt, b.get(), fx.get(), m, Part::Mic, m.mic, L"マイク", kIconMic, kMicY);
-    drawChannel(rt, b.get(), fx.get(), m, Part::Sys, m.sys, L"PC の音声", kIconSpeakers, kSysY);
-    drawPath(rt, b.get(), fx.get(), m);
+    if (m.settings) {
+        drawSettings(rt, b.get(), m);
+    } else {
+        drawDeck(rt, b.get(), m);
+        drawScreen(rt, b.get(), fx.get(), m);
+        drawChannel(rt, b.get(), fx.get(), m, Part::Mic, m.mic, L"マイク", kIconMic, kMicY);
+        drawChannel(rt, b.get(), fx.get(), m, Part::Sys, m.sys, L"PC の音声", kIconSpeakers, kSysY);
+        drawPath(rt, b.get(), fx.get(), m);
 
-    const bool checking = m.phase == P::Checking;
-    drawButton(rt, b.get(), m, Part::Check, checking ? kIconStop : kIconPulse, checking ? L"確認を止める" : L"音量を確認",
-               checking);
-    drawButton(rt, b.get(), m, Part::Open, kIconFolderOpen, L"保存先を開く", false);
+        const bool checking = m.phase == P::Checking;
+        drawButton(rt, b.get(), m, Part::Check, checking ? kIconStop : kIconPulse, checking ? L"確認を止める" : L"音量を確認",
+                   checking);
+        drawButton(rt, b.get(), m, Part::Open, kIconFolderOpen, L"保存先を開く", false);
+    }
     drawComment(rt, b.get(), m);
     drawGuide(rt, m);
 
@@ -659,7 +738,7 @@ void UiPainter::drawDeck(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
             b->SetColor(C(timeColor));
             rt->DrawTextLayout({tb.left, tb.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
-        drawChip(rt, b, m, started ? kRecChipX : kChipX, false);
+        drawChip(rt, b, m, started ? kRecChipX : kChipX, kChipY, false);
         drawHint(rt, b, m, edge - 10);
         drawStatus(rt, b, m, {tb.left, kStatusTop, edge - 8, kStatusBottom});
     } else {
@@ -684,7 +763,7 @@ void UiPainter::drawDeck(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
             b->SetColor(C(timeColor));
             rt->DrawTextLayout({tr - 200, kTimerBox.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
-        drawChip(rt, b, m, tr - tw - 10 - 66, true);
+        drawChip(rt, b, m, tr - tw - 10 - 66, kChipY, true);
         drawStatus(rt, b, m, {std::max(right.left + 12, kEdgeAud + kDeckGap + 14), kStatusTop, tr + 4, kStatusBottom});
     } else if (!screenSide || s < 0.99f) {
         drawSideLabel(rt, b, {std::min(kAudTimeRight, right.left + 10), kDeckTop, kAudTimeRight, kDeckBottom}, L"録音",
@@ -850,10 +929,10 @@ void UiPainter::drawPause(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const 
 }
 
 // REC (screen, crimson) / AUDIO (blue) with a breathing dot while recording, 確認中 while checking the levels.
-void UiPainter::drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float x, bool audio) {
+void UiPainter::drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float x, float y, bool audio) {
     using P = UiModel::Phase;
     if (m.phase == P::Checking && !audio) {
-        const D2D1_RECT_F r{x, kChipY, x + 56, kChipY + kChipH};
+        const D2D1_RECT_F r{x, y, x + 56, y + kChipH};
         b->SetColor(C(kCyan, 0.8f));
         rt->DrawRoundedRectangle(D2D1::RoundedRect(inset(r, 0.5f), 4, 4), b, 1);
         b->SetColor(C(kCyanText));
@@ -862,7 +941,7 @@ void UiPainter::drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
     }
     if (m.phase != P::Recording) return;
     if (m.paused) {   // PAUSE with two breathing bars, in amber
-        const D2D1_RECT_F r{x, kChipY, x + 66, kChipY + kChipH};
+        const D2D1_RECT_F r{x, y, x + 66, y + kChipH};
         const float cy = (r.top + r.bottom) / 2;
         panel(rt, b, r, 4, kWarnBg, kWarnBorder, 0);
         b->SetColor(C(kAmber, 0.35f + 0.65f * m.pulse));
@@ -873,7 +952,7 @@ void UiPainter::drawChip(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
         return;
     }
     const std::wstring s = audio ? L"AUDIO" : L"REC";
-    const D2D1_RECT_F r{x, kChipY, x + (audio ? 66.f : 52.f), kChipY + kChipH};
+    const D2D1_RECT_F r{x, y, x + (audio ? 66.f : 52.f), y + kChipH};
     panel(rt, b, r, 4, audio ? kBlueChipBg : kRecChipBg, audio ? kBlue : kCrimson, 0);
     b->SetColor(C(audio ? kBlueHi : kRose, 0.35f + 0.65f * m.pulse));
     rt->FillEllipse(D2D1::Ellipse({r.left + 11, (r.top + r.bottom) / 2}, 3, 3), b);
@@ -1089,10 +1168,11 @@ void UiPainter::drawPath(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1So
     rt->DrawTextLayout({pr.left, pr.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+// icon 0: the label alone
 void UiPainter::drawButton(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part p, wchar_t icon,
                            const std::wstring& label, bool toggled) {
     const D2D1_RECT_F r = partRect(p);
-    const bool en = partEnabled(m.phase, m.audioOnly, p), hot = en && m.hot == p, down = hot && m.pressed == p;
+    const bool en = usable(m, p), hot = en && m.hot == p, down = hot && m.pressed == p;
     UINT32 fill = kControl, border = kControlBorder, edge = kEdge, fg = kLabel, ic = kLabel;
     if (!en) fill = kOffFill, border = kOffBorder, edge = 0, fg = ic = kOffText;
     else if (toggled) fill = kPinOnFill, border = hot ? kCyan : kPinOnBorder, edge = kPinOnEdge, fg = ic = kCyanText;
@@ -1100,13 +1180,98 @@ void UiPainter::drawButton(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const
     else if (hot) fill = kControlHot, border = kControlBorderHot;
     panel(rt, b, r, 5, fill, border, edge);
     const float tw = textWidth(label, button_.get());
-    const float iw = 13, gap = 6, dy = down ? 1.f : 0.f;
+    const float iw = icon ? 13.f : 0.f, gap = icon ? 6.f : 0.f, dy = down ? 1.f : 0.f;
     const float x = std::round((r.left + r.right) / 2 - (iw + gap + tw) / 2);
     b->SetColor(C(ic));
-    text(rt, b, std::wstring(1, icon), icon_.get(), {x, r.top + dy, x + iw, r.bottom + dy});
+    if (icon) text(rt, b, std::wstring(1, icon), icon_.get(), {x, r.top + dy, x + iw, r.bottom + dy});
     b->SetColor(C(fg));
     text(rt, b, label, button_.get(), {x + iw + gap, r.top + dy, r.right - 4, r.bottom + dy});
     if (m.showFocus && m.focus == p) focusRing(rt, b, r, 5);
+}
+
+// The settings view (the gear): the save folders, the shortcuts, and the log and the links, each under a heading,
+// in the main view's own fields and buttons.
+void UiPainter::drawSettings(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m) {
+    drawSection(rt, b, L"保存先", kSecDirs);
+    drawDirRow(rt, b, m, Part::OutDir, Part::OutChange, kIconVideo, L"録画・録音", m.outDir, L"", kOutY);
+    drawDirRow(rt, b, m, Part::ShotDir, Part::ShotChange, kIconCamera, L"スクショ", m.shotDir, L"録画と同じ場所", kShotDirY);
+    drawSection(rt, b, L"ショートカットキー", kSecKeys);
+    drawKeys(rt, b, m, kKeysY);
+    drawSection(rt, b, L"ログと情報", kSecLog);
+    drawButton(rt, b, m, Part::Logs, kIconDownload, m.logsBusy ? L"まとめています…" : L"ログを取得", false);
+    drawButton(rt, b, m, Part::Github, kIconOpenIn, L"GitHub", false);
+    drawButton(rt, b, m, Part::Site, kIconOpenIn, L"公式サイト", false);
+    drawAbout(rt, b);
+}
+
+// A heading and a hairline to the right edge.
+void UiPainter::drawSection(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const wchar_t* title, float y) {
+    float w = 0;
+    b->SetColor(C(kText3));
+    text(rt, b, title, badge_.get(), {kL, y, kR, y + 16}, 0, &w);
+    b->SetColor(C(kWellBorder));
+    rt->FillRectangle(D2D1::RectF(std::round(kL + w + 10), y + 8, kR, y + 9), b);
+}
+
+// A save folder: the field shows it and opens it in Explorer (also while recording); 変更 picks another in Explorer's
+// own folder picker and waits while a recording runs, like the device fields. unset: what an empty path means.
+void UiPainter::drawDirRow(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part field, Part change,
+                           wchar_t icon, const wchar_t* label, const std::wstring& path, const wchar_t* unset, float y) {
+    const D2D1_RECT_F f = partRect(field);
+    const bool hot = m.hot == field, down = hot && m.pressed == field;
+    b->SetColor(C(hot ? kText2 : kIcon));
+    text(rt, b, std::wstring(1, icon), icon_.get(), {kL, y, kL + 18, y + kRowH});
+    b->SetColor(C(kLabel));
+    text(rt, b, label, label_.get(), {kL + 20, y, kFieldL - 2, y + kRowH});
+    panel(rt, b, f, 5, down ? kControlDown : hot ? kControlHot : kInput, hot ? kControlBorderHot : kInputBorder, kInputEdge);
+    const D2D1_RECT_F tr{f.left + 8, f.top, f.right - 24, f.bottom};
+    if (path.empty()) {
+        b->SetColor(C(kText2));
+        text(rt, b, unset, field_.get(), tr);
+    } else {
+        b->SetColor(C(hot ? kPathFile : kPath));
+        text(rt, b, path, path_.get(), tr);
+    }
+    b->SetColor(C(hot ? kText2 : kText3));
+    text(rt, b, std::wstring(1, kIconFolderOpen), iconSmall_.get(), {f.right - 22, f.top, f.right - 6, f.bottom});
+    if (m.showFocus && m.focus == field) focusRing(rt, b, f, 5);
+    drawButton(rt, b, m, change, 0, L"変更", false);
+}
+
+// The three shortcuts as set, each in a key cap: amber when another app has the key (it does nothing then).
+void UiPainter::drawKeys(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float y) {
+    static const wchar_t* const kNames[3] = {L"録画", L"録音", L"スクショ"};
+    b->SetColor(C(kIcon));
+    text(rt, b, std::wstring(1, kIconKeyboard), icon_.get(), {kL, y, kL + 18, y + kKeysH});
+    rt->PushAxisAlignedClip({kL, y, kR, y + kKeysH}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    float x = kL + 26;
+    for (int i = 0; i < 3; ++i) {
+        const UiModel::Key& k = m.keys[i];
+        float lw = 0;
+        b->SetColor(C(kText2));
+        text(rt, b, kNames[i], sub_.get(), {x, y, x + 60, y + kKeysH}, 0, &lw);
+        const std::wstring s = k.taken ? k.text + L" 使用中" : k.text;
+        const float left = std::round(x + lw + 7);
+        const D2D1_RECT_F r{left, y + 3, left + std::round(textWidth(s, key_.get())) + 16, y + kKeysH - 3};
+        panel(rt, b, r, 4, k.taken ? kWarnBg : kWell, k.taken ? kWarnBorder : kControlBorder, k.taken ? 0 : kInputEdge);
+        b->SetColor(C(k.taken ? kAmberText : k.text == L"なし" ? kText3 : kFieldText));
+        text(rt, b, s, key_.get(), r);
+        x = r.right + 16;
+    }
+    rt->PopAxisAlignedClip();
+}
+
+// What 「Rec Cue! について」 told before the settings view: the version and who guides.
+void UiPainter::drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b) {
+    const D2D1_RECT_F r = kAboutBox;
+    panel(rt, b, r, 5, kWell, kWellBorder, 0);
+    b->SetColor(C(kIcon));
+    text(rt, b, std::wstring(1, kIconInfo), iconSmall_.get(), {r.left + 7, r.top, r.left + 21, r.bottom});
+    float w = 0;
+    b->SetColor(C(kFieldText));
+    text(rt, b, L"Rec Cue! " + wide(kVersion), badge_.get(), {r.left + 26, r.top, r.left + 140, r.bottom}, 0, &w);
+    b->SetColor(C(kText3));
+    text(rt, b, L"案内役 湊 しおり", sub_.get(), {r.left + 26 + w + 10, r.top, r.right - 8, r.bottom});
 }
 
 // しおり's line under the buttons: a speech bubble whose tail points at her.
