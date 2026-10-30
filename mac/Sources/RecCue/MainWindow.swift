@@ -30,6 +30,14 @@ final class MainWindow: NSObject, NSWindowDelegate {
     private var recStatus = "", recTone = Tone.normal, alert = false
     private var flashUntil = 0.0    // the camera button lights up briefly after a shot
     private var hotkeys: Hotkeys?   // the shortcuts in any app (none in --ui-autotest)
+    private var settings = false    // the settings view (the gear) in place of the deck and the rows
+    private var packing = false     // ログを取得 is writing its ZIP (on another thread)
+    /// The last ZIP of ログを取得 (the autotest reads it).
+    private(set) var lastPack: (zip: URL, result: LogPack.Result)?
+    /// Tests (--ui-autotest): the folder 変更 picks, without the panel (shot: the screenshots'; nil: cancelled) …
+    var testPick: ((Bool) -> URL?)?
+    /// … and where ログを取得 writes (not Downloads; Finder is not opened).
+    var testLogsDir: URL?
 
     private static func now() -> Double { ProcessInfo.processInfo.systemUptime }
 
@@ -69,14 +77,19 @@ final class MainWindow: NSObject, NSWindowDelegate {
     /// The autotest: a click on the window while another app is in front reaches the button (not only the window).
     var takesFirstClick: Bool { view.acceptsFirstMouse(for: nil) }
 
-    /// The autotest: a key as if pressed in the window (Tab 48, Space 49, ↓ 125).
+    /// The autotest: a key as if pressed in the window (Tab 48, Space 49, Esc 53, ↓ 125).
     func press(_ keyCode: UInt16, shift: Bool = false) {
-        let chars = keyCode == 48 ? "\t" : keyCode == 49 ? " " : ""
+        let chars = keyCode == 48 ? "\t" : keyCode == 49 ? " " : keyCode == 53 ? "\u{1b}" : ""
         guard let e = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: shift ? [.shift] : [],
                                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                        context: nil, characters: chars, charactersIgnoringModifiers: chars,
                                        isARepeat: false, keyCode: keyCode) else { return }
         view.keyDown(with: e)
+    }
+
+    /// The autotest: a click on a part, if it can be used now.
+    func click(_ p: Part) {
+        if view.model.enabled(p) { activate(p) }
     }
 
     func show() {
@@ -150,7 +163,18 @@ final class MainWindow: NSObject, NSWindowDelegate {
                                                         : "録音だけ: マイクと PC の音声 (\(key(.audio)))"
         case .pin: return window.level == .floating ? "最前面の固定をやめる" : "最前面に固定する"
         case .shot: return "スクショ (\(key(.shot))) — Rec Cue! の窓は写りません"
-        case .gear: return "設定・ログ・ショートカットキー・リンク"
+        case .gear: return settings ? "設定を閉じる" : "設定 — 保存先・ショートカットキー・ログ・リンク"
+        case .back: return "戻る (Esc)"
+        case .outDir, .shotDir: return "Finder で開く"
+        case .outChange, .shotChange:
+            if !m.enabled(p) { return "録画中・録音中は変えられません" }
+            return p == .outChange ? "録画と録音の保存先を、Finder の画面で選ぶ"
+                                   : "スクショの保存先を選ぶ — 録画と同じフォルダーを選ぶと「録画と同じ場所」に戻ります"
+        case .logs:
+            return packing ? "ログをまとめています"
+                           : "ログを取得 — 直近 7 日のログと録画ごとの記録を ZIP にまとめ、ダウンロードに置きます"
+        case .github: return Config.load().0.githubUrl
+        case .site: return Config.load().0.siteUrl
         case .format:
             return m.enabled(.format) ? "録音の形式: \(m.audioFormat) — クリックで M4A・WAV から選べます (録画はいつも MP4)" : ""
         case .pause, .audioPause:
@@ -224,6 +248,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
         let c = controller
         switch e {
         case .starting:
+            showSettings(false)   // the deck shows the recording (its time and ■)
             passingUntil = 0
             noticeUntil = 0
             warnScene = nil
@@ -374,6 +399,16 @@ final class MainWindow: NSObject, NSWindowDelegate {
             m.pathLabel = "保存先"
             m.path = ((c.lastFile ?? cfg.resolvedOutDir).path as NSString).abbreviatingWithTildeInPath
         }
+        m.settings = settings
+        if settings {   // the folders and the shortcuts in use
+            m.outDir = Self.shown(cfg.resolvedOutDir)
+            m.shotDir = cfg.shotDir.isEmpty ? "" : Self.shown(cfg.resolvedShotDir)
+            m.keys = Hotkeys.Action.allCases.map { a in
+                guard let k = hotkeys?.keys[a], !k.text.isEmpty else { return UiModel.Key() }
+                return UiModel.Key(text: k.text, taken: !k.registered)
+            }
+            m.logsBusy = packing
+        }
         m.guideRec = c.state == .recording && !c.paused
         m.topmost = window.level == .floating
         m.pulse = c.state == .recording ? 0.5 + 0.5 * cos(.pi * Date().timeIntervalSince(t0)) : 1
@@ -502,6 +537,9 @@ final class MainWindow: NSObject, NSWindowDelegate {
         split = split < target ? min(target, split + step) : max(target, split - step)
     }
 
+    /// A folder as the window shows it (~/Movies/画面録画).
+    static func shown(_ u: URL) -> String { (u.path as NSString).abbreviatingWithTildeInPath }
+
     static func clock(_ s: Double) -> String {
         let n = Int(s)
         return String(format: "%02d:%02d:%02d", n / 3600, n / 60 % 60, n % 60)
@@ -556,52 +594,148 @@ final class MainWindow: NSObject, NSWindowDelegate {
                 Config.set("system", $0)
                 if c.check != nil { c.startCheck() }
             }
-        case .gear: gearMenu()
+        case .gear: showSettings(!settings)
+        case .back: showSettings(false)
+        case .outDir: openDir(shot: false)
+        case .shotDir: openDir(shot: true)
+        case .outChange: chooseDir(shot: false)
+        case .shotChange: chooseDir(shot: true)
+        case .logs: exportLogs()
+        case .github: openLink(Config.load().0.githubUrl)
+        case .site: openLink(Config.load().0.siteUrl)
         case .guide: talk()
         case .check: c.check != nil ? c.endCheck(said: true) : c.startCheck()
         }
         refresh()
     }
 
-    private func gearMenu() {
-        let cfg = Config.load().0
-        let menu = NSMenu()
-        menu.addItem(ClosureMenuItem(title: "設定ファイルを開く") { [weak self] in self?.openText(Config.url) })
-        menu.addItem(ClosureMenuItem(title: "ログを見る") { [weak self] in
-            if let f = Log.file, FileManager.default.fileExists(atPath: f.path) { self?.openText(f) }
-            else { NSWorkspace.shared.open(Paths.logs) }
-        })
-        // ショートカットキー ▸ each one with its key (or なし / that another app has it); all open config.ini
-        let keys = NSMenuItem(title: "ショートカットキー", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        let tabs = NSMutableParagraphStyle()
-        tabs.tabStops = [NSTextTab(textAlignment: .right, location: 300)]
-        for (a, name) in [(Hotkeys.Action.record, "録画の開始と停止"), (.audio, "録音の開始と停止"), (.shot, "スクショ")] {
-            let it = ClosureMenuItem(title: name) { [weak self] in self?.openText(Config.url) }
-            it.attributedTitle = NSAttributedString(string: name + "\t" + (hotkeys?.keys[a]?.shown ?? "なし"),
-                                                    attributes: [.font: NSFont.menuFont(ofSize: 0), .paragraphStyle: tabs])
-            sub.addItem(it)
-        }
-        sub.addItem(.separator())
-        sub.addItem(ClosureMenuItem(title: "設定ファイルで変える") { [weak self] in self?.openText(Config.url) })
-        keys.submenu = sub
-        menu.addItem(keys)
-        menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "GitHub を開く") { [weak self] in self?.openLink(cfg.githubUrl) })
-        menu.addItem(ClosureMenuItem(title: "公式サイトを開く") { [weak self] in self?.openLink(cfg.siteUrl) })
-        menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "Rec Cue! について") { [weak self] in self?.about() })
-        show(menu, at: WindowView.gear, rightAligned: true)
+    /// The gear: the settings view in place of the deck and the rows (the header, しおり and the band stay), or back.
+    func showSettings(_ on: Bool) {
+        guard settings != on else { return }
+        settings = on
+        view.model.hot = nil
+        view.model.pressed = nil
+        view.model.focus = on ? .back : .gear
+        Log.event("ui.view", ok: true, msg: on ? "settings" : "main")
+        refresh()
     }
 
-    /// config.ini and the log in TextEdit (Notepad in the Windows version).
-    private func openText(_ url: URL) {
-        let edit = URL(fileURLWithPath: "/System/Applications/TextEdit.app")
-        if FileManager.default.fileExists(atPath: edit.path) {
-            NSWorkspace.shared.open([url], withApplicationAt: edit, configuration: NSWorkspace.OpenConfiguration())
-        } else {
-            NSWorkspace.shared.open(url)
+    /// A save folder in Finder (made first when it is not there yet).
+    private func openDir(shot: Bool) {
+        let cfg = Config.load().0
+        let d = shot ? cfg.resolvedShotDir : cfg.resolvedOutDir
+        Paths.ensure(d)
+        let ok = NSWorkspace.shared.open(d)
+        Log.event("ui.open_dir", ok: ok, msg: (shot ? "shot " : "out ") + d.path)
+    }
+
+    /// 変更: the Mac's folder picker, a sheet on the window, at the folder in use. The folder must take a file before it
+    /// is kept. The default place is kept as an empty value (out_dir: ~/Movies/画面録画, shot_dir: with the
+    /// recordings), so it goes on following that place. Used from the next recording / screenshot on.
+    private func chooseDir(shot: Bool) {
+        guard view.model.enabled(shot ? .shotChange : .outChange) else { return }
+        let cfg = Config.load().0
+        let cur = shot ? cfg.resolvedShotDir : cfg.resolvedOutDir
+        Paths.ensure(cur)   // so that the picker opens in it
+        view.model.pressed = nil
+        let sw = Stopwatch()
+        if let pick = testPick {
+            useDir(shot: shot, pick(shot), ms: sw.ms)
+            return
         }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = cur
+        panel.message = shot ? "スクショの保存先を選ぶ" : "録画と録音の保存先を選ぶ"
+        panel.prompt = "選択"
+        panel.beginSheetModal(for: window) { [weak self] r in
+            MainActor.assumeIsolated { self?.useDir(shot: shot, r == .OK ? panel.url : nil, ms: sw.ms) }
+        }
+    }
+
+    /// The folder picked for 変更 (nil: cancelled).
+    private func useDir(shot: Bool, _ dir: URL?, ms: Double) {
+        let kind = shot ? "shot" : "out"
+        guard let dir else {
+            Log.event("ui.folder", ok: true, ms: ms, msg: "kind=\(kind) cancelled")
+            return
+        }
+        guard controller.state == .idle else {   // a recording started (shortcut, menu bar) while the picker was open
+            Log.event("ui.folder", ok: false, ms: ms, msg: "kind=\(kind) a recording started meanwhile; not changed")
+            return
+        }
+        if let why = Self.writeError(dir) {
+            Log.event("ui.folder", ok: false, ms: ms, msg: "kind=\(kind) cannot write in \(dir.path): \(why)")
+            passText("このフォルダーには保存できません。ほかの場所をお選びください。", 6, .bad)
+            return
+        }
+        let base = shot ? Config.load().0.resolvedOutDir : Config().resolvedOutDir
+        let value = Self.samePath(dir, base) ? "" : dir.path
+        let ok = Config.set(shot ? "shot_dir" : "out_dir", value)
+        if ok && !shot { controller.forgetLastFile() }   // the main view's 保存先 shows the new folder
+        Log.event("ui.folder", ok: ok, ms: ms, msg: "kind=\(kind) default=\(value.isEmpty) \(dir.path)")
+        if ok {
+            passText(shot ? "スクショの保存先を変えました。" : "保存先を変えました。次の録画から使います。", 4, .good)
+        } else {
+            passText("保存先を書き込めませんでした。", 6, .bad)
+        }
+        refresh()
+    }
+
+    /// nil when the folder takes a new file (an empty one, removed again); otherwise why not. A read-only or
+    /// unreachable place is not kept, so the next recording does not fail to start there.
+    static func writeError(_ dir: URL) -> String? {
+        let f = dir.appendingPathComponent(".rec-cue-write-test-\(getpid())-\(UInt32.random(in: 0...UInt32.max)).tmp")
+        let fd = Darwin.open(f.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return String(cString: strerror(errno)) }
+        close(fd)
+        unlink(f.path)
+        return nil
+    }
+
+    /// The same folder (links followed; macOS's disks do not tell case apart).
+    static func samePath(_ a: URL, _ b: URL) -> Bool {
+        a.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+            == b.resolvingSymlinksInPath().standardizedFileURL.path.lowercased()
+    }
+
+    /// ログを取得: the logs and records of the last week in one ZIP in Downloads, to attach as it is. Written on another
+    /// thread (Downloads may be slow to answer); Finder then shows it selected.
+    private func exportLogs() {
+        guard !packing else { return }
+        packing = true
+        let dir = testLogsDir ?? LogPack.downloads
+        Paths.ensure(dir)
+        let zip = LogPack.freeName(dir), about = LogPack.about()
+        Log.event("logs.export", ok: true, msg: "start \(zip.path)")
+        let box = Unchecked(self)
+        LogPack.running.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = LogPack.write(zip, days: LogPack.days, about: about)
+            LogPack.running.leave()
+            Task { @MainActor in box.value.packed(zip, r) }
+        }
+        refresh()
+    }
+
+    /// The ZIP is there: Finder shows it selected (to drag into a mail or a chat).
+    private func packed(_ zip: URL, _ r: LogPack.Result) {
+        packing = false
+        lastPack = (zip, r)
+        Log.event("logs.export", ok: r.error.isEmpty, ms: r.ms, msg: r.json(zip).text)
+        if r.error.isEmpty {
+            if testLogsDir == nil {
+                NSWorkspace.shared.activateFileViewerSelecting([zip])
+                Log.event("logs.show", ok: true)
+            }
+            passText("ログを ZIP にまとめ、ダウンロードに置きました。", 5, .good)
+        } else {
+            passText("ログをまとめられませんでした。", 8, .bad)
+        }
+        refresh()
     }
 
     private func openLink(_ s: String) {
@@ -612,19 +746,9 @@ final class MainWindow: NSObject, NSWindowDelegate {
         NSWorkspace.shared.open(u)
     }
 
-    private func about() {
-        let a = NSAlert()
-        a.messageText = "Rec Cue! \(App.version)"
-        a.informativeText = "画面とマイクと Mac の音を 1 本の MP4 に、音だけなら M4A・WAV に録る軽い録画アプリです。\n\n"
-            + "案内役: 湊 しおり (みなと しおり)\n設定とログ: "
-            + (Paths.appSupport.path as NSString).abbreviatingWithTildeInPath
-        a.alertStyle = .informational
-        a.runModal()
-    }
-
-    /// A popup menu under a part (field menus: at its bottom-left; the gear: right-aligned), with the current value
-    /// checked. An item titled "-" is a separator.
-    private func popup(at r: NSRect, _ items: [(String, String)], current: String, rightAligned: Bool = false,
+    /// A popup menu under a field, from its bottom-left, with the current value checked. An item titled "-" is a
+    /// separator.
+    private func popup(at r: NSRect, _ items: [(String, String)], current: String,
                        _ chose: @escaping (String) -> Void) {
         let menu = NSMenu()
         let box = Unchecked(chose)
@@ -637,14 +761,8 @@ final class MainWindow: NSObject, NSWindowDelegate {
             it.state = value.lowercased() == current.lowercased() ? .on : .off
             menu.addItem(it)
         }
-        show(menu, at: r, rightAligned: rightAligned)
-    }
-
-    /// A menu under a part: from its bottom-left, or right-aligned to it (the gear).
-    private func show(_ menu: NSMenu, at r: NSRect, rightAligned: Bool) {
         view.model.pressed = nil
-        let x = rightAligned ? r.maxX - menu.size.width : r.minX
-        menu.popUp(positioning: nil, at: NSPoint(x: x, y: r.maxY + 2), in: view)
+        menu.popUp(positioning: nil, at: NSPoint(x: r.minX, y: r.maxY + 2), in: view)
         refresh()
     }
 }

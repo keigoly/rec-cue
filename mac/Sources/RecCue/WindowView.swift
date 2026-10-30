@@ -64,10 +64,19 @@ enum Fonts {
 
 enum Phase { case idle, checking, starting, recording, saving }
 enum Tone { case normal, good, warn, bad }
-enum Part: Hashable { case record, audio, pause, audioPause, pin, shot, gear, check, open, format, screen, mic, sys, guide }
+enum Part: Hashable, CaseIterable {
+    case record, audio, pause, audioPause, pin, shot, gear, check, open, format, screen, mic, sys, guide
+    // the settings view (the gear)
+    case back, outDir, outChange, shotDir, shotChange, logs, github, site
+}
 
 /// Everything the painter needs (the Windows version's UiModel).
 struct UiModel {
+    /// A shortcut in the settings view: as the Mac shows it (⌃⌥R) or なし, and whether another app has it.
+    struct Key {
+        var text = "なし"
+        var taken = false
+    }
     struct Channel {
         var setting = "自動"           // the menu label of the setting
         var mode = ""                   // 自動 / 既定 … when the setting is a preset
@@ -105,28 +114,50 @@ struct UiModel {
     var comment = ""
     var commentTone = Tone.normal
     var guideRec = false
+    // the settings view (the gear) in place of the deck and the rows
+    var settings = false
+    var outDir = ""                    // the folders in use, as shown; shotDir "" = with the recordings
+    var shotDir = ""
+    var keys = [Key(), Key(), Key()]   // 録画・録音・スクショ
+    var logsBusy = false               // ログを取得 is writing its ZIP
 
     var screenLive: Bool { phase == .starting || phase == .recording || phase == .saving ? !audioOnly : false }
     var audioLive: Bool { phase == .starting || phase == .recording || phase == .saving ? audioOnly : false }
 
-    /// Which parts can be used now (disabled ones get no hover, press or click).
+    /// Which parts can be used now (disabled ones get no hover, press or click), in the view that is shown.
     func enabled(_ p: Part) -> Bool {
+        guard Self.inView(p, settings) else { return false }
         let idle = phase == .idle || phase == .checking
         switch p {
         case .record: return idle || (phase == .recording && !audioOnly)
         case .audio: return idle || (phase == .recording && audioOnly)
         case .pause: return phase == .recording && !audioOnly
         case .audioPause: return phase == .recording && audioOnly
-        case .screen, .mic, .sys, .format, .check: return idle
-        case .pin, .shot, .gear, .open: return true
+        case .screen, .mic, .sys, .format, .check, .outChange, .shotChange: return idle
+        case .pin, .shot, .gear, .open, .back, .outDir, .shotDir, .github, .site: return true
+        case .logs: return !logsBusy
         case .guide: return phase != .starting && phase != .saving
+        }
+    }
+
+    /// The parts of each view: the header's tools and しおり are in both.
+    static func inView(_ p: Part, _ settings: Bool) -> Bool {
+        switch p {
+        case .pin, .shot, .gear, .guide: return true
+        case .back, .outDir, .outChange, .shotDir, .shotChange, .logs, .github, .site: return settings
+        default: return !settings
         }
     }
 }
 
 final class WindowView: NSView, NSViewToolTipOwner {
     static let size = NSSize(width: 480, height: 340)
-    var model = UiModel() { didSet { needsDisplay = true } }
+    var model = UiModel() {
+        didSet {
+            needsDisplay = true
+            if model.settings != oldValue.settings { installTips() }   // each view has its own tools
+        }
+    }
     var onPart: ((Part) -> Void)?
     /// The tooltip of a part, asked when it is about to show ("" = none).
     var tipText: ((Part) -> String)?
@@ -156,12 +187,28 @@ final class WindowView: NSView, NSViewToolTipOwner {
     static let guideBox = NSRect(x: 402, y: 240, width: 76, height: 98)
     static let bubble = NSRect(x: 14, y: 304, width: 380, height: 28)
     static let rowY: [Part: CGFloat] = [.screen: 120, .mic: 156, .sys: 192]
+    // the settings view (the gear): the same header with ← and 設定, then a section each for the save folders, the
+    // shortcuts, and the log and the links; しおり and her bubble stay where they are (the Windows version's places)
+    static let back = NSRect(x: 14, y: 8, width: 28, height: 28)
+    static let setChipX: CGFloat = 98, setChipY: CGFloat = 12   // REC / AUDIO / PAUSE and the time, while recording
+    static let secDirs: CGFloat = 44, outY: CGFloat = 62, shotDirY: CGFloat = 96   // 保存先: 録画・録音 / スクショ
+    static let dirR: CGFloat = 398, changeL: CGFloat = 404      // the folder's field (from 98) and 変更
+    static let secKeys: CGFloat = 138, keysY: CGFloat = 156, keysH: CGFloat = 26   // ショートカットキー
+    static let secLog: CGFloat = 196                            // ログと情報
+    static let logs = NSRect(x: 14, y: 214, width: 140, height: 30)
+    static let github = NSRect(x: 160, y: 214, width: 116, height: 30)
+    static let site = NSRect(x: 282, y: 214, width: 114, height: 30)
+    static let about = NSRect(x: 14, y: 254, width: 382, height: 24)   // the version (what 「Rec Cue! について」 showed)
 
     func part(at p: NSPoint) -> Part? {
         func circle(_ cx: CGFloat, _ cy: CGFloat, _ r: CGFloat) -> Bool { hypot(p.x - cx, p.y - cy) <= r }
         let m = model
         var hit: Part?
-        if circle(50, 76, 28) { hit = .record }
+        if m.settings {   // a folder's row opens it also from its icon and label
+            hit = [Part.back, .pin, .shot, .gear, .outDir, .outChange, .shotDir, .shotChange, .logs, .github, .site]
+                .first { rect(of: $0).contains(p) }
+            if hit == nil && (Self.guideBox.contains(p) || Self.bubble.contains(p)) { hit = .guide }
+        } else if circle(50, 76, 28) { hit = .record }
         else if circle(434, 76, 24) { hit = .audio }
         else if circle(100, 76, 19) { hit = .pause }
         else if circle(391, 76, 17) { hit = .audioPause }
@@ -222,6 +269,8 @@ final class WindowView: NSView, NSViewToolTipOwner {
 
     static let tabOrder: [Part] = [.record, .pause, .audioPause, .audio, .format, .pin, .shot, .gear, .screen, .mic, .sys,
                                    .check, .open]
+    static let setOrder: [Part] = [.back, .pin, .shot, .gear, .outDir, .outChange, .shotDir, .shotChange, .logs,
+                                   .github, .site]
 
     override func keyDown(with e: NSEvent) {
         if e.isARepeat { return }
@@ -232,6 +281,8 @@ final class WindowView: NSView, NSViewToolTipOwner {
                 model.showFocus = model.showFocus || f != .guide
                 onPart?(f)
             }
+        case 53 where model.settings:   // Esc: the settings view closes
+            onPart?(.back)
         case 125, 118:   // ↓, F4
             if let f = model.focus, [.screen, .mic, .sys].contains(f), model.enabled(f) {
                 model.showFocus = true
@@ -242,7 +293,7 @@ final class WindowView: NSView, NSViewToolTipOwner {
     }
 
     private func moveFocus(_ dir: Int) {
-        let order = Self.tabOrder, n = order.count
+        let order = model.settings ? Self.setOrder : Self.tabOrder, n = order.count
         var i = model.focus.flatMap { order.firstIndex(of: $0) } ?? (dir > 0 ? n - 1 : 0)
         if model.focus == .guide { i = dir > 0 ? 0 : n - 1 }   // the guide is not in the order: from Pause / Open on
         for _ in 0..<n {
@@ -257,16 +308,22 @@ final class WindowView: NSView, NSViewToolTipOwner {
 
     // MARK: tooltips
 
-    /// The parts with a tooltip (the Windows version's tool rects; しおり: her picture only).
+    /// The parts with a tooltip in the view that is shown (the Windows version's tool rects; しおり: her picture only).
     func installTips() {
         removeAllToolTips()
         tips.removeAll()
-        let rects: [(Part, NSRect)] = [(.record, NSRect(x: 24, y: 50, width: 52, height: 52)),
-                                       (.audio, NSRect(x: 412, y: 54, width: 44, height: 44)),
-                                       (.pause, NSRect(x: 83, y: 59, width: 34, height: 34)),
-                                       (.audioPause, NSRect(x: 376, y: 61, width: 30, height: 30)),
-                                       (.pin, Self.pin), (.shot, Self.shot), (.gear, Self.gear), (.format, Self.format),
+        var rects: [(Part, NSRect)] = [(.pin, Self.pin), (.shot, Self.shot), (.gear, Self.gear),
                                        (.guide, Self.guideBox)]
+        if model.settings {
+            rects += [(.back, Self.back), (.outDir, Self.dirField(Self.outY)), (.outChange, rect(of: .outChange)),
+                      (.shotDir, Self.dirField(Self.shotDirY)), (.shotChange, rect(of: .shotChange)),
+                      (.logs, Self.logs), (.github, Self.github), (.site, Self.site)]
+        } else {
+            rects += [(.record, NSRect(x: 24, y: 50, width: 52, height: 52)),
+                      (.audio, NSRect(x: 412, y: 54, width: 44, height: 44)),
+                      (.pause, NSRect(x: 83, y: 59, width: 34, height: 34)),
+                      (.audioPause, NSRect(x: 376, y: 61, width: 30, height: 30)), (.format, Self.format)]
+        }
         for (p, r) in rects { tips[addToolTip(r, owner: self, userData: nil)] = p }
     }
 
@@ -278,8 +335,7 @@ final class WindowView: NSView, NSViewToolTipOwner {
 
     override func resetCursorRects() {
         // the hand over the parts that can be used (refreshed when the model changes the enabled parts)
-        for p in [Part.record, .audio, .pause, .audioPause, .pin, .shot, .gear, .check, .open, .format, .screen, .mic, .sys,
-                  .guide] where model.enabled(p) {
+        for p in Part.allCases where model.enabled(p) {   // the parts of the view that is shown
             addCursorRect(rect(of: p), cursor: .pointingHand)
         }
     }
@@ -300,8 +356,19 @@ final class WindowView: NSView, NSViewToolTipOwner {
         case .mic: return NSRect(x: 14, y: 156, width: 280, height: 28)
         case .sys: return NSRect(x: 14, y: 192, width: 280, height: 28)
         case .guide: return Self.guideBox
+        case .back: return Self.back
+        case .outDir: return NSRect(x: 14, y: Self.outY, width: Self.dirR - 14, height: 28)
+        case .outChange: return NSRect(x: Self.changeL, y: Self.outY, width: 466 - Self.changeL, height: 28)
+        case .shotDir: return NSRect(x: 14, y: Self.shotDirY, width: Self.dirR - 14, height: 28)
+        case .shotChange: return NSRect(x: Self.changeL, y: Self.shotDirY, width: 466 - Self.changeL, height: 28)
+        case .logs: return Self.logs
+        case .github: return Self.github
+        case .site: return Self.site
         }
     }
+
+    /// A save folder's field (the row's icon and label are left of it).
+    static func dirField(_ y: CGFloat) -> NSRect { NSRect(x: 98, y: y, width: dirR - 98, height: 28) }
 
     // MARK: drawing
 
@@ -309,20 +376,36 @@ final class WindowView: NSView, NSViewToolTipOwner {
         let m = model
         Pal.canvas.setFill()
         bounds.fill()
-        text("Rec Cue!", NSRect(x: 14, y: 8, width: 186, height: 28), .systemFont(ofSize: 13, weight: .bold), Pal.text,
-             kern: 0.2)
+        // the header: the name (in the settings view ← and 設定), then the pin, the screenshot and the settings
+        if m.settings {
+            iconButton(.back, "arrow.left")
+            text("設定", NSRect(x: 50, y: 8, width: 46, height: 28), Fonts.jp(13, 6), Pal.text, kern: 0.2)
+            if m.phase == .recording {   // a recording goes on meanwhile: its chip and its time beside the title
+                chip(m.paused ? "PAUSE" : m.audioOnly ? "AUDIO" : "REC", x: Self.setChipX, y: Self.setChipY)
+                let x = Self.setChipX + (m.paused || m.audioOnly ? 66 : 52) + 8
+                text(m.timer, NSRect(x: x, y: 8, width: 70, height: 28), Fonts.mono(11),
+                     m.paused ? Pal.text3 : Pal.text2)
+            }
+        } else {
+            text("Rec Cue!", NSRect(x: 14, y: 8, width: 186, height: 28), .systemFont(ofSize: 13, weight: .bold),
+                 Pal.text, kern: 0.2)
+        }
         iconButton(.pin, m.topmost ? "pin.fill" : "pin", accent: m.topmost)
         iconButton(.shot, "camera", flash: m.shotFlash)
         if m.phase == .recording && m.shots > 0 { counter(m.shots) }
-        iconButton(.gear, "gearshape")
-        deck(m)
-        screenRow(m)
-        channelRow(.mic, "mic", "マイク", m.mic, m)
-        channelRow(.sys, "speaker.wave.2", "PC の音声", m.sys, m)
-        pathWell(m)
-        bottomButton(.check, m.phase == .checking ? "stop" : "waveform.path.ecg",
-                     m.phase == .checking ? "確認を止める" : "音量を確認", toggled: m.phase == .checking)
-        bottomButton(.open, "folder", "保存先を開く", toggled: false)
+        iconButton(.gear, "gearshape", accent: m.settings)
+        if m.settings {
+            settingsView(m)
+        } else {
+            deck(m)
+            screenRow(m)
+            channelRow(.mic, "mic", "マイク", m.mic, m)
+            channelRow(.sys, "speaker.wave.2", "PC の音声", m.sys, m)
+            pathWell(m)
+            bottomButton(.check, m.phase == .checking ? "stop" : "waveform.path.ecg",
+                         m.phase == .checking ? "確認を止める" : "音量を確認", toggled: m.phase == .checking)
+            bottomButton(.open, "folder", "保存先を開く", toggled: false)
+        }
         bubble(m)
         guide(m)
         if m.phase == .recording {
@@ -391,13 +474,15 @@ final class WindowView: NSView, NSViewToolTipOwner {
         return draw(a, r, align: align)
     }
 
-    /// One line, vertically centred, cut with "…"; returns the width of the text as drawn.
+    /// One line, vertically centred, cut with "…" (at its end, or in the middle for a path); returns the width of the
+    /// text as drawn.
     @discardableResult
-    func draw(_ a: NSAttributedString, _ r: NSRect, align: NSTextAlignment = .left) -> CGFloat {
+    func draw(_ a: NSAttributedString, _ r: NSRect, align: NSTextAlignment = .left,
+              cut: NSLineBreakMode = .byTruncatingTail) -> CGFloat {
         let s = NSMutableAttributedString(attributedString: a)
         let ps = NSMutableParagraphStyle()
         ps.alignment = align
-        ps.lineBreakMode = .byTruncatingTail
+        ps.lineBreakMode = cut
         s.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: s.length))
         var size = NSSize.zero
         Self.guarded(s) {
@@ -659,27 +744,28 @@ final class WindowView: NSView, NSViewToolTipOwner {
         if showsFocus(part) { circleRing(cx, cy, r + 3) }
     }
 
-    private func chip(_ kind: String, x: CGFloat) {
+    /// REC / AUDIO / PAUSE (y: its top; 53 on the deck, beside 設定 in the settings view).
+    private func chip(_ kind: String, x: CGFloat, y: CGFloat = 53) {
         let w: CGFloat = kind == "REC" ? 52 : 66
-        let r = NSRect(x: x, y: 53, width: w, height: 20)
+        let r = NSRect(x: x, y: y, width: w, height: 20)
         let a = 0.35 + 0.65 * model.pulse
         switch kind {
         case "REC":
             panel(r, 4, Pal.recChipBg, Pal.crimson, nil)
-            disc(x + 11, 63, 3, Pal.rose.withAlphaComponent(a))
-            text("REC", NSRect(x: x + 15, y: 53, width: 34, height: 20), Fonts.mono(11, .bold), Pal.rosePale,
+            disc(x + 11, y + 10, 3, Pal.rose.withAlphaComponent(a))
+            text("REC", NSRect(x: x + 15, y: y, width: 34, height: 20), Fonts.mono(11, .bold), Pal.rosePale,
                  align: .center, kern: 0.8)
         case "AUDIO":
             panel(r, 4, Pal.blueChipBg, Pal.blue, nil)
-            disc(x + 11, 63, 3, Pal.blueHi.withAlphaComponent(a))
-            text("AUDIO", NSRect(x: x + 15, y: 53, width: 48, height: 20), Fonts.mono(11, .bold), Pal.bluePale,
+            disc(x + 11, y + 10, 3, Pal.blueHi.withAlphaComponent(a))
+            text("AUDIO", NSRect(x: x + 15, y: y, width: 48, height: 20), Fonts.mono(11, .bold), Pal.bluePale,
                  align: .center, kern: 0.8)
         default:
             panel(r, 4, Pal.warnBg, Pal.warnBorder, nil)
             Pal.amber.withAlphaComponent(a).setFill()
-            NSRect(x: x + 7, y: 59.5, width: 2, height: 7).fill()
-            NSRect(x: x + 11, y: 59.5, width: 2, height: 7).fill()
-            text("PAUSE", NSRect(x: x + 15, y: 53, width: 48, height: 20), Fonts.mono(11, .bold), Pal.amberText,
+            NSRect(x: x + 7, y: y + 6.5, width: 2, height: 7).fill()
+            NSRect(x: x + 11, y: y + 6.5, width: 2, height: 7).fill()
+            text("PAUSE", NSRect(x: x + 15, y: y, width: 48, height: 20), Fonts.mono(11, .bold), Pal.amberText,
                  align: .center, kern: 0.8)
         }
     }
@@ -860,11 +946,90 @@ final class WindowView: NSView, NSViewToolTipOwner {
         }
         panel(r, 5, fill, border, edge)
         let font = Fonts.jp(11.5, 4)
-        let tw = Self.width(label, font)
-        let x = (r.midX - (19 + tw) / 2).rounded(), dy: CGFloat = down ? 1 : 0
-        symbol(glyph, NSRect(x: x, y: r.minY + dy, width: 13, height: r.height), 11, ink)
-        text(label, NSRect(x: x + 19, y: r.minY + dy, width: r.maxX - 4 - x - 19, height: r.height), font, ink)
+        let tw = Self.width(label, font), iw: CGFloat = glyph.isEmpty ? 0 : 19   // the icon and its gap ("": none)
+        let x = (r.midX - (iw + tw) / 2).rounded(), dy: CGFloat = down ? 1 : 0
+        if !glyph.isEmpty { symbol(glyph, NSRect(x: x, y: r.minY + dy, width: 13, height: r.height), 11, ink) }
+        text(label, NSRect(x: x + iw, y: r.minY + dy, width: r.maxX - 4 - x - iw, height: r.height), font, ink)
         if showsFocus(p) { focusRing(r, 5) }
+    }
+
+    // MARK: the settings view
+
+    /// The settings view (the gear): the save folders, the shortcuts, and the log and the links, each under a heading,
+    /// in the main view's own fields and buttons.
+    private func settingsView(_ m: UiModel) {
+        section("保存先", Self.secDirs)
+        dirRow(m, .outDir, .outChange, "video", "録画・録音", m.outDir, unset: "", Self.outY)
+        dirRow(m, .shotDir, .shotChange, "camera", "スクショ", m.shotDir, unset: "録画と同じ場所", Self.shotDirY)
+        section("ショートカットキー", Self.secKeys)
+        keys(m)
+        section("ログと情報", Self.secLog)
+        bottomButton(.logs, "arrow.down.to.line", m.logsBusy ? "まとめています…" : "ログを取得", toggled: false)
+        bottomButton(.github, "arrow.up.right.square", "GitHub", toggled: false)
+        bottomButton(.site, "arrow.up.right.square", "公式サイト", toggled: false)
+        about()
+    }
+
+    /// A heading and a hairline to the right edge.
+    private func section(_ title: String, _ y: CGFloat) {
+        let w = text(title, NSRect(x: 14, y: y, width: 452, height: 16), Fonts.jp(11, 6), Pal.text3)
+        let x = (14 + w + 10).rounded()
+        Pal.wellBorder.setFill()
+        NSRect(x: x, y: y + 8, width: 466 - x, height: 1).fill()
+    }
+
+    /// A save folder: the field shows it and opens it in Finder (also while recording); 変更 picks another in the Mac's
+    /// folder picker and waits while a recording runs, like the device fields. unset: what an empty path means.
+    private func dirRow(_ m: UiModel, _ field: Part, _ change: Part, _ glyph: String, _ label: String, _ path: String,
+                        unset: String, _ y: CGFloat) {
+        let f = Self.dirField(y), hot = m.hot == field, down = hot && m.pressed == field
+        symbol(glyph, NSRect(x: 14, y: y, width: 18, height: 28), 12, hot ? Pal.text2 : Pal.icon)
+        text(label, NSRect(x: 34, y: y, width: 62, height: 28), Fonts.jp(11.5, 6), Pal.label)
+        panel(f, 5, down ? Pal.controlDown : hot ? Pal.controlHot : Pal.input,
+              hot ? Pal.controlBorderHot : Pal.inputBorder, Pal.inputEdge)
+        let tr = NSRect(x: f.minX + 8, y: y, width: f.width - 32, height: 28)
+        if path.isEmpty {
+            text(unset, tr, Fonts.jp(11), Pal.text2)
+        } else {   // a long path keeps its start and the folder's own name
+            draw(NSAttributedString(string: path, attributes: [.font: Fonts.mono(11),
+                                                               .foregroundColor: hot ? Pal.pathFile : Pal.path]),
+                 tr, cut: .byTruncatingMiddle)
+        }
+        symbol("folder", NSRect(x: f.maxX - 22, y: y, width: 16, height: 28), 10, hot ? Pal.text2 : Pal.text3)
+        if showsFocus(field) { focusRing(f, 5) }
+        bottomButton(change, "", "変更", toggled: false)
+    }
+
+    /// The three shortcuts as set, each in a key cap: amber when another app has the key (it does nothing then).
+    private func keys(_ m: UiModel) {
+        let y = Self.keysY, h = Self.keysH, font = Fonts.mono(10.5, .semibold)
+        symbol("keyboard", NSRect(x: 14, y: y, width: 18, height: h), 12, Pal.icon)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: NSRect(x: 14, y: y, width: 452, height: h)).addClip()
+        var x: CGFloat = 40
+        for (i, name) in ["録画", "録音", "スクショ"].enumerated() {
+            let k = m.keys[i]
+            let lw = text(name, NSRect(x: x, y: y, width: 60, height: h), Fonts.jp(10.5), Pal.text2)
+            let s = k.taken ? k.text + " 使用中" : k.text
+            let left = (x + lw + 7).rounded()
+            let r = NSRect(x: left, y: y + 3, width: Self.width(s, font).rounded() + 16, height: h - 6)
+            panel(r, 4, k.taken ? Pal.warnBg : Pal.well, k.taken ? Pal.warnBorder : Pal.controlBorder,
+                  k.taken ? nil : Pal.inputEdge)
+            text(s, r, font, k.taken ? Pal.amberText : k.text == "なし" ? Pal.text3 : Pal.fieldText, align: .center)
+            x = r.maxX + 16
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    /// What 「Rec Cue! について」 told before the settings view: the version and who guides.
+    private func about() {
+        let r = Self.about
+        panel(r, 5, Pal.well, Pal.wellBorder, nil)
+        symbol("info.circle", NSRect(x: r.minX + 7, y: r.minY, width: 14, height: r.height), 10, Pal.icon)
+        let w = text("Rec Cue! \(App.version)", NSRect(x: r.minX + 26, y: r.minY, width: 114, height: r.height),
+                     Fonts.jp(11, 6), Pal.fieldText)
+        let x = r.minX + 26 + w + 10
+        text("案内役 湊 しおり", NSRect(x: x, y: r.minY, width: r.maxX - 8 - x, height: r.height), Fonts.jp(10.5), Pal.text3)
     }
 
     /// The room for her line in the bubble (after her name), and a line's width: --lines-check measures with these.

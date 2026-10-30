@@ -26,12 +26,14 @@ struct Config {
     var githubUrl = "https://github.com/keigoly/rec-cue"   // the gear menu's links (http / https only)
     var siteUrl = "https://official.keigoly.jp/"
 
-    static var url: URL { Paths.appSupport.appendingPathComponent("config.ini") }
+    static var url: URL { testURL ?? Paths.appSupport.appendingPathComponent("config.ini") }
+    /// Tests (--ui-autotest): another config.ini in place of the real one, while the folders are changed.
+    static var testURL: URL?
 
     static let defaultText = """
     ; Rec Cue! の設定 (UTF-8)。; で始まる行はコメントです。変更は次の録画から反映されます。
 
-    ; 保存先。空なら「ムービー/画面録画」
+    ; 保存先。空なら「ムービー/画面録画」(歯車の設定の「変更」で選ぶと書き換わる)
     out_dir=
     ; ファイル名の先頭 (後ろに 2026-10-27 193001 のような開始時刻が付く)
     name_prefix=Rec Cue
@@ -61,6 +63,7 @@ struct Config {
     latency_ms=150
 
     ; スクショ (録る画面と同じ画面。Rec Cue! の窓とマウスポインタは写りません) の保存先。空なら録画と同じ場所
+    ;   (歯車の設定の「変更」で選ぶと書き換わる)
     shot_dir=
     ; スクショをクリップボードにもコピーする (1 / 0)
     shot_clipboard=1
@@ -76,7 +79,7 @@ struct Config {
     ; スクショ
     shot_hotkey=Ctrl+Option+S
 
-    ; 設定のメニュー (右上の歯車) から開くページ
+    ; 歯車の設定の「GitHub」「公式サイト」で開くページ
     github_url=https://github.com/keigoly/rec-cue
     site_url=https://official.keigoly.jp/
     """
@@ -154,7 +157,8 @@ struct Config {
     }
 
     /// Sets one key in config.ini and keeps everything else, comments included (adds the line if it is missing).
-    static func set(_ key: String, _ value: String) {
+    @discardableResult
+    static func set(_ key: String, _ value: String) -> Bool {
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? defaultText
         var lines = text.components(separatedBy: "\n")
         if let i = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix(key + "=") }) {
@@ -165,8 +169,10 @@ struct Config {
         do {
             try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
             Log.event("ui.config", ok: true, msg: "\(key)=\(value)")
+            return true
         } catch {
             Log.event("ui.config", ok: false, msg: "\(key)=\(value): \(error.localizedDescription)")
+            return false
         }
     }
 

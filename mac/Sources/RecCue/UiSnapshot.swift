@@ -7,7 +7,7 @@ enum UiSnapshot {
         Bundle.main.url(forResource: name, withExtension: "png").flatMap { NSImage(contentsOf: $0) }
     }
 
-    /// idle / check / starting / rec / shot / paused / audio / saving / saved / warn
+    /// idle / check / starting / rec / shot / paused / audio / saving / saved / warn / settings / settings-rec
     static func model(_ state: String) -> UiModel {
         var m = UiModel()
         m.monitors = [CGRect(x: 0, y: 0, width: 1920, height: 1080), CGRect(x: 1920, y: -180, width: 2560, height: 1440)]
@@ -89,6 +89,20 @@ enum UiSnapshot {
             m.path = file + ".mp4"
         case "saved":
             m.path = file + ".mp4"
+        case "settings", "settings-rec":   // the settings view: the save folders, the shortcuts, the log, the links
+            m.settings = true
+            m.outDir = "~/Movies/画面録画"
+            m.keys = [UiModel.Key(text: "⌃⌥R"), UiModel.Key(text: "⌃⌥A"), UiModel.Key(text: "⌃⌥S")]
+            // ... while recording: 変更 waits, the chip and the time beside 設定; the pointer on a folder, and
+            // another app has the screenshot key
+            if state == "settings-rec" {
+                m.phase = .recording
+                m.timer = "00:03:21"
+                m.shotDir = "~/Pictures/スクショ"
+                m.hot = .shotDir
+                m.keys[2].taken = true
+                m.guideRec = true
+            }
         default:
             break
         }
@@ -110,7 +124,7 @@ enum UiSnapshot {
         switch state {
         case "check": scene = .checkMic
         case "starting": scene = .starting
-        case "rec": scene = .rec
+        case "rec", "settings-rec": scene = .rec
         case "shot":
             scene = .shot
             c.n = 3

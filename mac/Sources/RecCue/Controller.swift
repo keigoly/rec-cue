@@ -220,6 +220,11 @@ final class Controller {
         if said { emit(.checkEnded) }
     }
 
+    /// The save folder was changed: the window's 保存先 shows the new folder, not the last file in the old one.
+    func forgetLastFile() {
+        lastFile = nil
+    }
+
     func openFolder() {
         let dir = Config.load().0.resolvedOutDir
         Paths.ensure(dir)
@@ -241,7 +246,7 @@ final class Controller {
         }
         emit(wasStarted ? .finished(result) : .failedStart)
         if result["ok"]?.isTrue != true {
-            var why = "ログを確かめてください (歯車 → ログを見る)。"
+            var why = "ログを確かめてください (歯車 → ログを取得)。"
             if case .str(let e)? = result["error"] { why = e }
             if case .str(let by)? = result["ended_by"], by != "time", by != "app", by != "user", by != "signal" {
                 why = "途中で終わりました (\(by))。録れた所までは保存しています。"

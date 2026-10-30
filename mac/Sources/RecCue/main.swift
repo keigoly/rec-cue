@@ -21,6 +21,7 @@ import AVFoundation
 //   rec-cue --verify-file <file>
 //   rec-cue --lines-check   しおり's lines: per scene, the Mac's changes, load / pick time, any that would not fit
 //   rec-cue --hotkey-check  the shortcuts: how settings are read, and whether config.ini's three can be registered
+//   rec-cue --export-logs <file.zip>   the ZIP that ログを取得 makes, written there (for the tests)
 //   ... [--json-out <file>]   the result as one JSON object (also on stdout)
 //
 // Start it through scripts/run.sh (LaunchServices), so macOS asks about screen recording for Rec Cue! itself.
@@ -41,6 +42,7 @@ struct Args {
     var rec = RecordOptions()
     var noClipboard = false
     var snapshotPath: String?
+    var exportPath: String?
     var uiState = "idle"
     var at: DateComponents?   // --ui-snapshot --at 2026-10-22T14:00: しおり's line for that moment
     var includeSelf = false
@@ -75,6 +77,9 @@ func parseArgs(_ a: [String], base: RecordOptions) -> Args {
         case "--shot-selftest": r.mode = "shot-selftest"
         case "--lines-check": r.mode = "lines-check"
         case "--hotkey-check": r.mode = "hotkey-check"
+        case "--export-logs":
+            r.mode = "export-logs"
+            r.exportPath = val()
         case "--no-clipboard": r.noClipboard = true
         case "--include-self": r.includeSelf = true
         case "--version": r.mode = "version"
@@ -218,6 +223,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keys.append(.obj(([Part.record, .audio, .pause, .pin, .shot, .gear, .format, .guide]).map { p in
                 ("\(p)", .str(w.tip(p))) }))
         }
+        // the settings view: the gear opens it; Tab goes round its parts; 変更 keeps a folder that takes a file (empty
+        // when it is the default place), refuses one that does not, and does nothing when cancelled — with config.ini
+        // copied into the test folder meanwhile (the real one is not touched); ログを取得 writes its ZIP into the test
+        // folder (Finder is not opened; the ZIP, with this Mac's logs, is removed); Esc closes it
+        var settingsJ: [(String, J)] = []
+        var setOk = false
+        if let w = mainWindow {
+            w.click(.gear)
+            let opened = w.shown.settings && w.shown.focus == .back
+            var order: [String] = []
+            for _ in 0..<12 {
+                w.press(48)
+                order.append("\(w.shown.focus.map { "\($0)" } ?? "-")")
+            }
+            let tips: [(String, J)] = [Part.gear, .back, .outDir, .outChange, .shotChange, .logs].map { p in
+                ("\(p)", .str(w.tip(p))) }
+            Paths.ensure(shotDir)
+            let ini = shotDir.appendingPathComponent("autotest-config.ini")
+            let picked = shotDir.appendingPathComponent("autotest-folder", isDirectory: true)
+            try? FileManager.default.removeItem(at: ini)
+            try? FileManager.default.copyItem(at: Config.url, to: ini)
+            Config.testURL = ini
+            Paths.ensure(picked)
+            var folders: [J] = []
+            var expected: [Bool] = []
+            func pick(_ part: Part, _ url: URL?, _ step: String, out: String, shot: String, tone: Tone) {
+                w.testPick = { _ in url }
+                w.click(part)
+                let cfg = Config.load().0
+                expected.append(cfg.outDir == out && cfg.shotDir == shot && w.shown.commentTone == tone)
+                folders.append(.obj([("step", .str(step)), ("out_dir", .str(cfg.outDir)),
+                                     ("shot_dir", .str(cfg.shotDir)), ("shown_out", .str(w.shown.outDir)),
+                                     ("shown_shot", .str(w.shown.shotDir)), ("tone", .str("\(w.shown.commentTone)")),
+                                     ("comment", .str(w.shown.comment))]))
+            }
+            let before = Config.load().0
+            pick(.outChange, picked, "out: a folder of its own", out: picked.path, shot: before.shotDir, tone: .good)
+            pick(.shotChange, picked, "shot: the recordings' folder", out: picked.path, shot: "", tone: .good)
+            pick(.shotChange, URL(fileURLWithPath: "/System", isDirectory: true), "shot: read-only", out: picked.path,
+                 shot: "", tone: .bad)
+            pick(.outChange, nil, "out: cancelled", out: picked.path, shot: "", tone: .bad)
+            pick(.outChange, Config().resolvedOutDir, "out: the default", out: "", shot: "", tone: .good)
+            w.testPick = nil
+            Config.testURL = nil
+            let leftovers = ((try? FileManager.default.contentsOfDirectory(atPath: picked.path)) ?? []).count
+            try? FileManager.default.removeItem(at: ini)
+            try? FileManager.default.removeItem(at: picked)
+            // ログを取得
+            w.testLogsDir = shotDir
+            w.click(.logs)
+            let busy = w.shown.logsBusy && !w.shown.enabled(.logs)
+            let sw = Stopwatch()
+            while w.lastPack == nil && sw.ms < 15000 { await wait(0.05) }
+            var logs: [(String, J)] = [("busy_while_writing", .bool(busy)), ("waited_ms", .n(sw.ms, 0))]
+            if let p = w.lastPack {
+                logs += [("result", p.result.json(p.zip)), ("comment", .str(w.shown.comment)),
+                         ("enabled_after", .bool(w.shown.enabled(.logs)))]
+                try? FileManager.default.removeItem(at: p.zip)
+            }
+            w.testLogsDir = nil
+            w.press(53)   // Esc
+            let closed = !w.shown.settings && w.shown.focus == .gear
+            let packOk = w.lastPack?.result.error.isEmpty == true && (w.lastPack?.result.files ?? 0) > 0
+            setOk = opened && closed && expected.allSatisfy { $0 } && leftovers == 0 && busy && packOk
+            settingsJ = [("opened", .bool(opened)), ("tab", .arr(order.map { .str($0) })), ("tips", .obj(tips)),
+                         ("folders", .arr(folders)), ("folders_as_expected", .arr(expected.map { .bool($0) })),
+                         ("write_test_leftovers", .i(leftovers)), ("logs", .obj(logs)), ("esc_closed", .bool(closed))]
+        }
         // the level check: its button ends it; then its time (shortened to 2 s); then a recording takes over
         c.startCheck()
         await wait(1.5)
@@ -234,8 +307,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         c.startCheck()
         await wait(1)
         note("checking again")
+        mainWindow?.click(.gear)   // a recording that starts takes the window back to the deck
+        let setBeforeStart = mainWindow?.shown.settings == true
         c.start(audioOnly: false)
         note("start")
+        let closedByStart = setBeforeStart && mainWindow?.shown.settings == false
+        settingsJ.append(("closed_by_start", .bool(closedByStart)))
+        setOk = setOk && closedByStart
         // wait until it really records (a locked screen or a slow start must not turn the test into 0 s)
         var waited = 0.0
         while c.state == .starting && waited < 15 {
@@ -246,6 +324,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         note("recording")
         if let w = mainWindow {   // the tooltips while recording
             keys.append(.obj(([Part.record, .audio, .pause]).map { p in ("\(p) (recording)", .str(w.tip(p))) }))
+            // the settings view while recording: the folders open, 変更 waits; Esc goes back to the recording
+            w.click(.gear)
+            let m = w.shown
+            let waits = m.settings && !m.enabled(.outChange) && !m.enabled(.shotChange) && m.enabled(.outDir)
+                && m.enabled(.logs)
+            settingsJ.append(("while_recording", .obj([("open", .bool(m.settings)), ("change_waits", .bool(waits)),
+                                                       ("tip", .str(w.tip(.outChange)))])))
+            w.press(53)
+            setOk = setOk && waits && !w.shown.settings
         }
         c.screenshot()
         var shotWait = 0.0
@@ -415,7 +502,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                ("dialogs", .i(c.alerts - asked))]))
         }
         return .obj([("ok", .bool(first?["ok"]?.isTrue == true && second?["ok"]?.isTrue == true
-                                  && third?["ok"]?.isTrue == true && fourth?["ok"]?.isTrue == true)),
+                                  && third?["ok"]?.isTrue == true && fourth?["ok"]?.isTrue == true && setOk)),
+                     ("settings_ok", .bool(setOk)), ("settings", .obj(settingsJ)),
                      ("steps", .arr(states)), ("hotkeys", .arr(hot)),
                      ("result", first ?? .null), ("warnings", .arr(shown)), ("warn_result", second ?? .null),
                      ("keys", .arr(keys)), ("self_end", .obj(selfEnd)), ("dialogs", .obj(dialogs)),
@@ -478,6 +566,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if let q = quitAsked { Log.event("ui.quit", ok: true, ms: q.ms) }
+        // a log ZIP that is still being written gets 3 s, then the app goes anyway (the Windows version's waitPacker)
+        if LogPack.running.wait(timeout: .now() + 3) == .timedOut {
+            Log.event("logs.wait", ok: false, ms: 3000,
+                      msg: "the log ZIP is still being written; not waiting any longer")
+        }
         guard args.mode == "ui-quit-test", let p = args.jsonOut else { return }
         let r = controller?.lastResult
         let j = J.obj([("ok", .bool(quitAsked != nil && r?["ok"]?.isTrue == true)), ("quit_ms", .n(quitAsked?.ms ?? -1, 0)),
@@ -496,6 +589,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return Lines.check()
         case "hotkey-check":
             return Hotkeys.check()
+        case "export-logs":
+            guard let p = args.exportPath else { return .obj([("ok", .bool(false)), ("error", .str("no file"))]) }
+            let zip = URL(fileURLWithPath: p)
+            let j = LogPack.write(zip, days: LogPack.days, about: LogPack.about()).json(zip)
+            Log.line("logs.cli", [("result", j)])
+            return j
         case "list-devices":
             return await MainActor.run { Devices.listJson() }   // NSScreen belongs to the main thread
         case "request-access":
