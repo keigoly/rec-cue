@@ -13,6 +13,10 @@ RC="$TC/bin/x86_64-w64-mingw32-windres"
 
 mkdir -p build
 python3 tools/check_lines.py res/shiori-lines.txt >/dev/null   # しおりの台詞 (誤りがあれば止まる)
+# 版は src/common.h の kVersion と res/app.rc (exe のプロパティ) の 2 か所。0.5.0 は app.rc が 0.4.2 のままだった
+ver=$(sed -n 's/.*kVersion = "\([0-9.]*\)".*/\1/p' src/common.h)
+grep -q "\"ProductVersion\", \"$ver\"" res/app.rc && grep -q "PRODUCTVERSION ${ver//./,},0" res/app.rc ||
+  { echo "res/app.rc の版が src/common.h の $ver と違います" >&2; exit 1; }
 [ -f res/app.ico ] || uv run --quiet --with pillow python3 tools/make_icon.py res/icon-src.png res/app.ico
 "$RC" -O coff -I res -i res/app.rc -o build/app.res.o
 
@@ -21,6 +25,6 @@ python3 tools/check_lines.py res/shiori-lines.txt >/dev/null   # しおりの台
   -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 \
   src/*.cpp build/app.res.o -o build/rec-cue.exe \
   -ld3d11 -ldxgi -lmfplat -lmfreadwrite -lmfuuid -lmf -lole32 -loleaut32 -luuid -lavrt \
-  -lshell32 -lgdi32 -luser32 -lcomctl32 -lpsapi -lpropsys -lwindowscodecs -ld2d1 -ldwrite -ldwmapi
+  -lshell32 -lgdi32 -luser32 -lcomctl32 -lpsapi -lpropsys -lwindowscodecs -ld2d1 -ldwrite -ldwmapi -lwinhttp -lbcrypt
 
 ls -l build/rec-cue.exe

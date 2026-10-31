@@ -19,17 +19,24 @@ namespace rc {
 // Screen: the row that picks the monitor to record (its field or its small map).
 // AudioFormat: the file of a recording of sound alone (MP3 / WAV / M4A), a chip beside 録音 while nothing records.
 // The settings view (the gear) has its own parts: Back, the two save folders (OutDir / ShotDir: the field opens the
-// folder in Explorer, OutChange / ShotChange: 変更 picks another), Logs (ログを取得) and the two links.
-// Pin, Shot, Gear and Guide are in both views.
+// folder in Explorer, OutChange / ShotChange: 変更 picks another), Logs (ログを取得), the two links, and About (the
+// version row, which opens the update view while a newer release is offered).
+// The update view (a newer release on GitHub) has Back, UpdNotes (詳しく: the release's page) and OBS's three choices:
+// UpdNow (今すぐ更新), UpdLater (あとで) and UpdSkip (この版をスキップ).
+// Pin, Shot, Gear and Guide are in every view.
 enum class Part { None, Record, Audio, Pin, Shot, Gear, Mic, Sys, Check, Open, Guide, Pause, AudioPause, Screen, AudioFormat,
-                  Back, OutDir, OutChange, ShotDir, ShotChange, Logs, Github, Site };
+                  Back, OutDir, OutChange, ShotDir, ShotChange, Logs, Github, Site, About,
+                  UpdNotes, UpdNow, UpdLater, UpdSkip };
+
+// What the window shows under its header: the deck and the rows, the settings, or a newer release.
+enum class View { Main, Settings, Update };
 
 constexpr float kClientW = 480, kClientH = 340;   // client area in DIPs
 
 D2D1_RECT_F partRect(Part p);
 // DIPs; the label column of a channel row opens its menu too (and of a folder row, the folder)
-Part hitTest(float x, float y, bool settings);
-bool inView(Part p, bool settings);   // the part is in the settings view / in the main view
+Part hitTest(float x, float y, View v);
+bool inView(Part p, View v);   // the part is in that view
 D2D1_RECT_F guideRect();          // where the SD guide stands (for her tooltip)
 
 // The title bar in the window's own colours (DWM), so the two read as one surface.
@@ -83,8 +90,7 @@ struct UiModel {
     std::wstring recHotkey, shotHotkey, audioHotkey;   // shortcut hints (empty when not registered)
     std::wstring comment;     // what しおり says under the buttons
     Tone commentTone = Tone::Normal;
-    // the settings view (the gear), in place of the deck and the rows
-    bool settings = false;
+    View view = View::Main;   // the settings view (the gear) or the update view, in place of the deck and the rows
     std::wstring outDir;      // where recordings go
     std::wstring shotDir;     // where screenshots go (empty: with the recordings)
     struct Key {
@@ -93,6 +99,18 @@ struct UiModel {
     };
     Key keys[3];              // record, audio only, screenshot
     bool logsBusy = false;    // ログを取得 is packing the files
+    std::wstring newVersion;  // a newer release is offered: a dot on the gear, and the settings' version row opens it
+    // the update view: the release, what changed, and how far 今すぐ更新 has got
+    struct Update {
+        enum class State { Offer, Download, Verify, Swap, Failed } state = State::Offer;
+        std::wstring version, current, published;
+        uint64_t size = 0, got = 0;   // bytes of its rec-cue.exe / downloaded so far
+        std::vector<std::wstring> notes;   // "title\tthe rest" (update.h)
+        std::wstring error;       // why it failed, in a few words
+    } update;
+    bool busy() const {           // 今すぐ更新 is under way (the three choices wait)
+        return update.state != Update::State::Offer && update.state != Update::State::Failed;
+    }
 };
 
 bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p);
@@ -147,7 +165,8 @@ private:
     void drawDirRow(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part field, Part change, wchar_t icon,
                     const wchar_t* label, const std::wstring& path, const wchar_t* unset, float y);
     void drawKeys(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, float y);
-    void drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b);
+    void drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m);
+    void drawUpdate(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m);
     void panel(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, float radius, UINT32 fill,
                UINT32 border, UINT32 edge);
     void focusRing(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const D2D1_RECT_F& r, float radius);

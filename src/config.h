@@ -29,6 +29,8 @@ struct Config {
     std::wstring audioHotkey = L"Ctrl+Alt+A";   // start / stop recording audio only
     std::wstring githubUrl = L"https://github.com/keigoly/rec-cue";   // the settings menu links
     std::wstring siteUrl = L"https://official.keigoly.jp/";
+    bool updateCheck = true;             // ask GitHub for a newer release when the window opens
+    std::wstring updateSkip;             // the release 「この版をスキップ」 was chosen for (not offered again)
 
     std::wstring resolvedOutDir() const;
     std::wstring resolvedShotDir() const;

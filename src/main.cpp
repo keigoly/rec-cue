@@ -13,6 +13,9 @@
 //   rec-cue.exe --shot-selftest [--json-out <file>]     shows a small test square for a moment and checks that a
 //                                                       window left out of the shot is really missing from it
 //   rec-cue.exe --export-logs <zip> [--json-out <file>] ログを取得 without the window: the ZIP and its counts
+//   rec-cue.exe --update-check [--update-feed <url>] [--json-out <file>]   what the window asks GitHub when it opens
+//   rec-cue.exe --update-install [--json-out <file>]    今すぐ更新 without the window (this exe is replaced, not reopened)
+//   --pretend-version <v>   compares the latest release with <v> instead of this exe's version (tests; also the window)
 #include "common.h"  // windows.h first
 
 #include <dwmapi.h>
@@ -36,6 +39,7 @@
 #include "shiori.h"
 #include "shot.h"
 #include "ui_draw.h"
+#include "update.h"
 #include "video.h"
 
 using namespace rc;
@@ -50,10 +54,11 @@ namespace {
 
 struct Args {
     bool listDevices = false, record = false, verify = false, version = false, testPattern = false, probe = false, quit = false,
-         shotTest = false, audioOnly = false, linesCheck = false, any = false;
+         shotTest = false, audioOnly = false, linesCheck = false, updateCheck = false, updateInstall = false, any = false;
     double seconds = 0, pauseAt = 0, pauseFor = 0;
     int fps = 0, dpi = 0;
     std::wstring out, jsonOut, verifyFile, container, mic, system, testTone, snapshot, shot, at, audioFormat, exportLogs;
+    std::wstring updateFeed, pretend;   // --update-feed: another API address (tests)
     std::string error;
 };
 
@@ -67,6 +72,10 @@ Args parseArgs() {
             if (i + 1 < argc) dst = argv[++i];
             else a.error = "missing value for " + u8(s);
         };
+        if (s == L"--pretend-version") {   // still opens the window
+            val(a.pretend);
+            continue;
+        }
         a.any = true;
         if (s == L"--list-devices") a.listDevices = true;
         else if (s == L"--record") a.record = true;
@@ -78,6 +87,9 @@ Args parseArgs() {
         else if (s == L"--quit") a.quit = true;
         else if (s == L"--shot-selftest") a.shotTest = true;
         else if (s == L"--lines-check") a.linesCheck = true;
+        else if (s == L"--update-check") a.updateCheck = true;
+        else if (s == L"--update-install") a.updateInstall = true;
+        else if (s == L"--update-feed") val(a.updateFeed);
         else if (s == L"--shot") val(a.shot);
         else if (s == L"--export-logs") val(a.exportLogs);
         else if (s == L"--seconds") { std::wstring v; val(v); a.seconds = _wtof(v.c_str()); }
@@ -253,6 +265,27 @@ int runShotSelftest(const std::wstring& jsonOut) {
 
 // --lines-check: しおり's lines as the window would show them. How many per scene, the time to read them and to pick
 // one, the memory they take, and every line (filled in with the longest values) that would not fit in her bubble.
+// しおり's lines about アップデート (update.h): fixed ones, measured by --lines-check like those in shiori-lines.txt.
+// {v}: a version.
+const wchar_t* const kUpdOffer = L"新しい版 {v} が出ております。更新なさいますか。";
+const wchar_t* const kUpdLater = L"承知いたしました。次に開いたときに改めてお知らせします。";
+const wchar_t* const kUpdSkip = L"{v} は見送ります。次の版が出ましたらお知らせします。";
+const wchar_t* const kUpdGetting = L"新しい版を受け取っております。少々お待ちください。";
+const wchar_t* const kUpdRestart = L"入れ替えが済みました。開き直します。";
+const wchar_t* const kUpdDone = L"{v} に更新いたしました。設定はそのままでございます。";
+const wchar_t* const kUpdFailed = L"更新できませんでした。「ページを開く」からお入れください。";
+const wchar_t* const kUpdNoFolder = L"この場所には書き込めません。「ページを開く」からどうぞ。";
+const wchar_t* const kUpdNoReopen = L"入れ替えました。お手数ですが、開き直してください。";
+const wchar_t* const kUpdLines[] = {kUpdOffer, kUpdLater,  kUpdSkip,     kUpdGetting, kUpdRestart,
+                                    kUpdDone,  kUpdFailed, kUpdNoFolder, kUpdNoReopen};
+
+std::wstring withVersion(const wchar_t* line, const std::wstring& v) {
+    std::wstring s = line;
+    const size_t k = s.find(L"{v}");
+    if (k != std::wstring::npos) s.replace(k, 3, v);
+    return s;
+}
+
 int runLinesCheck(const std::wstring& jsonOut) {
     UiPainter p;
     if (!p.init()) {
@@ -287,6 +320,16 @@ int runLinesCheck(const std::wstring& jsonOut) {
         widths.push_back({w, i});
         if (w > room) over += (over.empty() ? "" : ",") + entry(i, w);
     }
+    std::string fixed;   // アップデート's lines, with the longest version they could name
+    float fixedMax = 0;
+    for (const wchar_t* l : kUpdLines) {
+        const std::wstring t = withVersion(l, L"10.10.10");
+        const float w = p.commentWidth(t);
+        fixedMax = std::max(fixedMax, w);
+        const std::string e = fmt("{\"dip\":%.1f,\"text\":", w) + json(t) + "}";
+        fixed += (fixed.empty() ? "" : ",") + e;
+        if (w > room) over += (over.empty() ? "" : ",") + e;
+    }
     std::sort(widths.begin(), widths.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
     std::string widest;
     for (size_t k = 0; k < widths.size() && k < 12; ++k) widest += (k ? "," : "") + entry(widths[k].second, widths[k].first);
@@ -313,7 +356,7 @@ int runLinesCheck(const std::wstring& jsonOut) {
                               "\"empty_picks\":%d,\"room_dip\":%.1f,",
                               ok ? "true" : "false", lines.size(), loadMs, addedKb, pickUs, empty, room) +
                           "\"scenes\":{" + scenes + "},\"problems\":[" + probs + "],\"over\":[" + over + "],\"widest\":[" +
-                          widest + "]}";
+                          widest + "]" + fmt(",\"fixed_max_dip\":%.1f,\"fixed\":[", fixedMax) + fixed + "]}";
     Log::line("lines.check", fmt("\"ok\":%s,\"lines\":%zu,\"load_ms\":%.2f", ok ? "true" : "false", lines.size(), loadMs));
     writeText(jsonOut, s);
     return ok ? 0 : 4;
@@ -343,11 +386,45 @@ int runExportLogs(const std::wstring& zip, const std::wstring& jsonOut) {
     return ok ? 0 : 4;
 }
 
+// --update-check / --update-install: what the window does when it opens and on 今すぐ更新, without the window.
+// Install replaces this exe (kept as <name>.prev.exe) and does not open the new one.
+int runUpdate(const Args& a) {
+    const Config cfg = loadConfig();
+    const std::wstring current = a.pretend.empty() ? wide(kVersion) : a.pretend;
+    const UpdateCheck c = checkLatest(a.updateFeed.empty() ? kUpdateApi : a.updateFeed);
+    const bool newer = c.ok && compareVersions(c.latest.version, current) > 0;
+    const bool skipped = newer && c.latest.version == cfg.updateSkip;
+    Log::event("update.check", c.ok, c.ms,
+               fmt("status=%d latest=%s current=%s newer=%d skipped=%d (cli)", c.status, u8(c.latest.version).c_str(),
+                   u8(current).c_str(), newer, skipped) + (c.error.empty() ? "" : " " + c.error));
+    std::string s = updateCheckJson(c);
+    s = s.substr(0, s.size() - 1) + ",\"current\":" + json(current) + ",\"newer\":" + (newer ? "true" : "false") +
+        ",\"skipped\":" + (skipped ? "true" : "false") + ",\"update_check\":" + (cfg.updateCheck ? "true" : "false") + "}";
+    if (!a.updateInstall) {
+        writeText(a.jsonOut, s);
+        return c.ok ? 0 : 4;
+    }
+    UpdateResult u;
+    if (!newer) {
+        u.step = "current";
+        u.error = c.ok ? "the latest release is not newer" : "no release";
+    } else {
+        UpdateProgress p;
+        Stopwatch sw;
+        u = installRelease(c.latest, selfPath(), &p);
+        Log::event("update.install", u.ok, sw.ms(), "(cli) " + updateResultJson(u));
+    }
+    writeText(a.jsonOut, "{\"ok\":" + std::string(u.ok ? "true" : "false") + ",\"check\":" + s +
+                             ",\"install\":" + updateResultJson(u) + "}");
+    return u.ok ? 0 : 5;
+}
+
 int runCli(const Args& a) {
     if (!a.error.empty()) {
         writeText(a.jsonOut, "{\"ok\":false,\"error\":" + json(a.error) + "}");
         return 2;
     }
+    if (a.updateCheck || a.updateInstall) return runUpdate(a);
     if (!a.exportLogs.empty()) return runExportLogs(a.exportLogs, a.jsonOut);
     if (a.shotTest) return runShotSelftest(a.jsonOut);
     if (a.linesCheck) return runLinesCheck(a.jsonOut);
@@ -441,7 +518,10 @@ int runCli(const Args& a) {
 constexpr UINT WM_APP_STOPPED = WM_APP + 1;
 constexpr UINT WM_APP_SHOT = WM_APP + 2;   // the PNG of a screenshot has been written
 constexpr UINT WM_APP_LOGS = WM_APP + 3;   // the ZIP of ログを取得 has been written
-constexpr UINT_PTR kTimer = 1, kTimerNotice = 2, kTimerFlash = 3, kTimerSplit = 4, kTimerSay = 5, kTimerResume = 6;
+constexpr UINT WM_APP_UPDATE = WM_APP + 4;      // GitHub has answered (or not) about the latest release
+constexpr UINT WM_APP_INSTALLED = WM_APP + 5;   // 今すぐ更新 has swapped the exe (or stopped)
+constexpr UINT_PTR kTimer = 1, kTimerNotice = 2, kTimerFlash = 3, kTimerSplit = 4, kTimerSay = 5, kTimerResume = 6,
+                   kTimerUpdate = 7;
 constexpr int kHotkey = 1, kHotkeyShot = 2, kHotkeyAudio = 3;
 constexpr UINT kMenuBase = 1000;
 constexpr UINT kSysTopmost = 0x0010, kSysShot = 0x0020;   // system menu items (Windows uses the low 4 bits)
@@ -508,7 +588,7 @@ struct App {
     std::wstring noticeText;
     Part hot = Part::None, pressed = Part::None, focus = Part::Record;
     bool showFocus = false, mouseIn = false;
-    bool settings = false;        // the settings view (the gear) in place of the deck and the rows
+    View view = View::Main;       // the settings view (the gear) or the update view, in place of the deck and the rows
     // ログを取得: the ZIP is written by `packer`
     std::thread packer;
     bool packing = false;
@@ -517,6 +597,22 @@ struct App {
     HANDLE packDone = nullptr;    // set by the worker when the ZIP is written (exit waits on it with a limit)
     double hold[2] = {-90, -90};   // meter peak hold (dBFS) and when it was last raised
     int64_t holdAt[2] = {0, 0};
+    // アップデート (update.h): GitHub is asked on `checker` when the window opens; 今すぐ更新 runs on `updater`
+    std::wstring version = wide(kVersion);   // what the latest release is compared with (--pretend-version in tests)
+    HANDLE mutex = nullptr;     // one window: given up just before 今すぐ更新 opens the new exe
+    std::thread checker;
+    HANDLE checkDone = nullptr;
+    UpdateCheck upd;            // GitHub's answer (read once `checker` has been joined)
+    bool updOffered = false;    // a newer release, not skipped: the gear's dot, the version row and the update view
+    std::thread updater;
+    HANDLE updDone = nullptr;
+    UpdateProgress updProg;
+    UpdateResult updResult;
+    std::wstring updExe;        // the exe being replaced (opened again once it is)
+    std::wstring updatedFrom;   // the window was opened by 今すぐ更新 of this version (updated-from.txt)
+    bool updBusy = false, updFailed = false;
+    std::wstring updLine, updBefore;   // what she says in the update view, and what she said before it
+    UiModel::Tone updBeforeTone = UiModel::Tone::Normal;
 };
 App g;
 
@@ -866,8 +962,29 @@ UiModel model() {
     const bool passing = qpcNow() < g.passingUntil;
     m.comment = passing ? g.passing : g.line;
     m.commentTone = passing ? g.passingTone : g.lineTone;
-    m.settings = g.settings;
-    if (g.settings) {   // the folders and the shortcuts in use (while recording: as that recording started)
+    m.view = g.view;
+    if (g.updOffered) m.newVersion = g.upd.latest.version;
+    if (g.view == View::Update) {
+        using S = UiModel::Update::State;
+        const Release& r = g.upd.latest;
+        m.update.version = r.version;
+        m.update.current = g.version;
+        m.update.published = r.published;
+        m.update.size = r.size;
+        m.update.got = g.updProg.got;
+        m.update.notes = r.notes;
+        m.update.state = g.updFailed ? S::Failed : !g.updBusy ? S::Offer
+                         : g.updProg.stage == UpdateProgress::Download ? S::Download
+                         : g.updProg.stage == UpdateProgress::Verify   ? S::Verify
+                                                                       : S::Swap;
+        const std::string& st = g.updResult.step;
+        m.update.error = st == "folder"                       ? L"この場所には書き込めません"
+                         : st == "download"                   ? L"受け取れませんでした"
+                         : st == "size" || st == "sha256"     ? L"受け取ったファイルに誤りがありました"
+                         : st == "smoke"                      ? L"新しい版を起動できませんでした"
+                                                              : L"入れ替えられませんでした";
+    }
+    if (g.view == View::Settings) {   // the folders and the shortcuts in use (while recording: as that recording started)
         m.outDir = g.cfg.resolvedOutDir();
         m.shotDir = g.cfg.shotDir.empty() ? L"" : g.cfg.resolvedShotDir();
         const std::pair<const std::wstring*, bool> keys[3] = {
@@ -1051,12 +1168,16 @@ ThumbView thumbView() {
 
 void syncThumb() { g.thumb.show(thumbView()); }
 
-void showSettings(bool on);
+void showView(View v);
 
 // audio: microphone + PC audio only (MP3 / WAV / M4A), shown in blue; otherwise the screen as well (.mp4), in red.
 void startRecording(bool audio) {
     if (g.recording || g.stopping || g.starting) return;
-    if (g.settings) showSettings(false);   // the deck shows the recording (its time and ■)
+    if (g.updBusy) {   // the exe is being replaced (a few seconds): the window is about to open again
+        notice(L"更新の途中です。数秒お待ちください", UiModel::Tone::Warn);
+        return;
+    }
+    if (g.view != View::Main) showView(View::Main);   // the deck shows the recording (its time and ■)
     stopCheck();
     std::vector<std::string> warn;
     g.cfg = loadConfig(&warn);
@@ -1257,8 +1378,11 @@ std::wstring menuText(const std::wstring& s) {   // '&' would underline the next
     return o;
 }
 
-bool enabled(Part p) {
-    return inView(p, g.settings) && partEnabled(phase(), g.recAudio, p) && !(p == Part::Logs && g.packing);
+bool enabled(Part p) {   // as usable() in ui_draw.cpp
+    const bool choice = p == Part::UpdNow || p == Part::UpdLater || p == Part::UpdSkip ||
+                        (p == Part::Back && g.view == View::Update);
+    return inView(p, g.view) && partEnabled(phase(), g.recAudio, p) && !(p == Part::Logs && g.packing) &&
+           !(choice && g.updBusy) && !(p == Part::About && !g.updOffered);
 }
 
 // Opens `menu` under the field of `part` and returns the command picked (0: none).
@@ -1434,16 +1558,203 @@ std::wstring keyText(const std::wstring& key, bool registered) {
 
 void moveTooltips();
 
-// The gear: the settings view in place of the deck and the rows (the header, しおり and the band stay), or back.
-void showSettings(bool on) {
-    if (g.settings == on) return;
-    if (on && !g.recording && !g.starting && !g.stopping) g.cfg = loadConfig();   // as the file is now
-    g.settings = on;
+// The gear: the settings view in place of the deck and the rows (the header, しおり and the band stay), or back; or
+// the update view. What she said in the update view goes with it.
+void showView(View v) {
+    if (g.view == v) return;
+    if (v == View::Settings && !g.recording && !g.starting && !g.stopping) g.cfg = loadConfig();   // as the file is now
+    if (g.view == View::Update && g.line == g.updLine) {
+        g.line = g.updBefore;
+        g.lineTone = g.updBeforeTone;
+    }
+    g.view = v;
     g.hot = g.pressed = Part::None;
-    g.focus = on ? Part::Back : Part::Gear;
+    g.focus = v == View::Main ? Part::Gear : v == View::Update && !g.updBusy ? Part::UpdNow : Part::Back;
     moveTooltips();   // each view has its own tools
-    Log::event("ui.view", true, -1, on ? "settings" : "main");
+    Log::event("ui.view", true, -1, v == View::Settings ? "settings" : v == View::Update ? "update" : "main");
     invalidate();
+}
+
+// ---- アップデート (update.h)
+
+// What she says while the update view is open (put back as it was when the view closes).
+void sayUpdate(const std::wstring& s, UiModel::Tone t) {
+    if (g.line != g.updLine || g.updLine.empty()) {
+        g.updBefore = g.line;
+        g.updBeforeTone = g.lineTone;
+    }
+    g.line = g.updLine = s;
+    g.lineTone = t;
+    invalidate();
+}
+
+void openUpdate() {
+    if (!g.updOffered) return;
+    showView(View::Update);
+    if (!g.updBusy && !g.updFailed) sayUpdate(withVersion(kUpdOffer, g.upd.latest.version), UiModel::Tone::Normal);
+}
+
+// When the window opens: GitHub's latest release, on a worker (the answer comes as WM_APP_UPDATE). update_check=0 in
+// the settings file keeps Rec Cue! from asking.
+void startUpdateCheck() {
+    if (!g.cfg.updateCheck) {
+        Log::event("update.check", true, -1, "off (update_check=0)");
+        return;
+    }
+    if (!g.checkDone) g.checkDone = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g.checker = std::thread([] {
+        g.upd = checkLatest();
+        if (g.checkDone) SetEvent(g.checkDone);
+        PostMessageW(g.hwnd, WM_APP_UPDATE, 0, 0);
+    });
+}
+
+// A newer release that was not skipped: shown at once when nothing is going on (as OBS does), otherwise a dot on the
+// gear and the settings' version row wait for it. No answer is not mentioned (only logged).
+void onUpdateChecked() {
+    if (g.checker.joinable()) g.checker.join();   // also makes the worker's answer visible here
+    const UpdateCheck& c = g.upd;
+    const bool newer = c.ok && compareVersions(c.latest.version, g.version) > 0;
+    const bool skipped = newer && c.latest.version == g.cfg.updateSkip;
+    Log::event("update.check", c.ok, c.ms,
+               fmt("status=%d latest=%s current=%s newer=%d skipped=%d", c.status, u8(c.latest.version).c_str(),
+                   u8(g.version).c_str(), newer, skipped) + (c.error.empty() ? "" : " " + c.error));
+    if (!newer || skipped) return;
+    g.updOffered = true;
+    const bool now = phase() == UiModel::Phase::Idle && g.view == View::Main;
+    Log::event("update.offer", true, -1, u8(c.latest.version) + (now ? " (view)" : " (dot on the gear: busy)"));
+    if (now) openUpdate();
+    invalidate();
+}
+
+// 今すぐ更新: the release is downloaded, checked and swapped in on `updater` (WM_APP_INSTALLED). Recording waits for
+// those few seconds, and the title says so, so that deploy.sh's --quit leaves it alone too. After a failure the
+// button opens the release's page instead.
+void startInstall() {
+    if (g.updBusy || !g.updOffered || !enabled(Part::UpdNow)) return;
+    const Release& r = g.upd.latest;
+    if (g.updFailed) {
+        Log::event("update.choice", true, -1, "page " + u8(r.version));
+        openUrl(r.page);
+        return;
+    }
+    stopCheck();
+    g.updBusy = true;
+    g.updProg.stage = UpdateProgress::Download;
+    g.updProg.got = 0;
+    g.updExe = selfPath();
+    if (!g.updDone) g.updDone = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+    if (g.updDone) ResetEvent(g.updDone);
+    SetWindowTextW(g.hwnd, L"更新中 - Rec Cue!");
+    SetTimer(g.hwnd, kTimerUpdate, 100, nullptr);   // the progress line
+    g.focus = Part::Back;
+    Log::event("update.choice", true, -1, "now " + u8(r.version) + " into " + u8(g.updExe));
+    sayUpdate(kUpdGetting, UiModel::Tone::Normal);
+    g.updater = std::thread([r] {
+        g.updResult = installRelease(r, g.updExe, &g.updProg);
+        if (g.updDone) SetEvent(g.updDone);
+        PostMessageW(g.hwnd, WM_APP_INSTALLED, 0, 0);
+    });
+}
+
+void registerHotkey();
+void unregisterHotkeys();
+
+// %USERPROFILE%\.rec-cue\updated-from.txt: the version 今すぐ更新 replaced, for the new exe to mention once.
+std::wstring updatedNotePath() { return appDir() + L"\\updated-from.txt"; }
+
+void writeUpdatedNote(const std::wstring& from) {
+    HANDLE f = CreateFileW(updatedNotePath().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    const std::string s = u8(from);
+    DWORD w = 0;
+    WriteFile(f, s.data(), static_cast<DWORD>(s.size()), &w, nullptr);
+    CloseHandle(f);
+}
+
+// The note, if 今すぐ更新 left one in the last 2 minutes (an older one is only removed). Read once.
+std::wstring takeUpdatedNote() {
+    const std::wstring path = updatedNotePath();
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return {};
+    char b[64]{};
+    DWORD n = 0;
+    FILETIME written{}, now{};
+    const bool read = ReadFile(f, b, sizeof(b) - 1, &n, nullptr) && GetFileTime(f, nullptr, nullptr, &written);
+    CloseHandle(f);
+    DeleteFileW(path.c_str());
+    GetSystemTimeAsFileTime(&now);
+    const auto t = [](const FILETIME& x) { return (static_cast<uint64_t>(x.dwHighDateTime) << 32) | x.dwLowDateTime; };
+    if (!read || t(now) < t(written) || t(now) - t(written) > 120ull * 10000000ull) return {};
+    return wide(std::string(b, n));
+}
+
+// Swapped in: the new exe opens in place of this window and says so. Otherwise the exe is as it was, and the reason
+// stays in the view.
+void onUpdateInstalled() {
+    if (g.updater.joinable()) g.updater.join();
+    KillTimer(g.hwnd, kTimerUpdate);
+    g.updBusy = false;
+    SetWindowTextW(g.hwnd, kTitle);
+    const UpdateResult& u = g.updResult;
+    Log::event("update.install", u.ok, u.downloadMs + u.verifyMs + u.smokeMs + u.swapMs, updateResultJson(u));
+    if (!u.ok) {   // back to the update view (it may have been left meanwhile) for the reason and ページを開く
+        g.updFailed = true;
+        showView(View::Update);
+        g.focus = Part::UpdNow;
+        sayUpdate(u.step == "folder" ? kUpdNoFolder : kUpdFailed, UiModel::Tone::Bad);
+        return;
+    }
+    // The new exe opens as from the Start menu (no arguments, which any version takes): this one first gives up its
+    // shortcuts and the one-window mutex, and leaves a note that the new one reads to say it was updated.
+    sayUpdate(kUpdRestart, UiModel::Tone::Good);
+    RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    unregisterHotkeys();
+    if (g.mutex) CloseHandle(g.mutex);
+    g.mutex = nullptr;
+    writeUpdatedNote(g.version);
+    const bool reopened = relaunch(g.updExe);
+    Log::event("update.relaunch", reopened, -1, u8(g.updExe), reopened ? S_OK : HRESULT_FROM_WIN32(GetLastError()));
+    if (reopened) {
+        DestroyWindow(g.hwnd);
+        return;
+    }
+    // the new exe is in place (the next start opens it); this window goes on as it was
+    DeleteFileW(updatedNotePath().c_str());
+    g.mutex = CreateMutexW(nullptr, TRUE, L"Local\\RecCue.Window");
+    registerHotkey();
+    g.updOffered = false;
+    showView(View::Main);
+    passText(kUpdNoReopen, 10000, UiModel::Tone::Warn);
+}
+
+// あとで: asked again when the window opens next time; the dot on the gear stays meanwhile.
+void updateLater() {
+    Log::event("update.choice", true, -1, "later " + u8(g.upd.latest.version));
+    showView(View::Main);
+    passText(kUpdLater, 5000, UiModel::Tone::Normal);
+}
+
+// この版をスキップ: this version is not offered again (update_skip); a later one is.
+void updateSkip() {
+    const std::wstring v = g.upd.latest.version;
+    const bool ok = saveConfigValue(L"update_skip", v);
+    g.cfg.updateSkip = v;
+    g.updOffered = false;
+    Log::event("update.choice", ok, -1, "skip " + u8(v));
+    showView(View::Main);
+    passText(withVersion(kUpdSkip, v), 5000, UiModel::Tone::Normal);
+}
+
+// Like the screenshot's PNG: a worker that does not end in time must not keep a closed Rec Cue! alive.
+bool waitWorker(std::thread& t, HANDLE done, DWORD ms, const char* what) {
+    if (!t.joinable()) return true;
+    if (done && WaitForSingleObject(done, ms) != WAIT_OBJECT_0) {
+        Log::event("update.wait", false, ms, std::string(what) + " is still running; not waiting any longer");
+        return false;
+    }
+    t.join();
+    return true;
 }
 
 // A save folder in Explorer (made first when it is not there yet).
@@ -1620,8 +1931,19 @@ void activate(Part p) {
     switch (p) {
         case Part::Record: toggleRecord(); break;
         case Part::Audio: toggleAudio(); break;
-        case Part::Gear: showSettings(!g.settings); break;
-        case Part::Back: showSettings(false); break;
+        case Part::Gear: showView(g.view == View::Settings ? View::Main : View::Settings); break;
+        case Part::Back:
+            if (g.view == View::Update) updateLater();
+            else showView(View::Main);
+            break;
+        case Part::About: openUpdate(); break;
+        case Part::UpdNow: startInstall(); break;
+        case Part::UpdLater: updateLater(); break;
+        case Part::UpdSkip: updateSkip(); break;
+        case Part::UpdNotes:
+            Log::event("update.choice", true, -1, "notes " + u8(g.upd.latest.version));
+            openUrl(g.upd.latest.page);
+            break;
         case Part::OutDir: openDir(false); break;
         case Part::ShotDir: openDir(true); break;
         case Part::OutChange: chooseDir(false); break;
@@ -1662,9 +1984,11 @@ void moveFocus(int dir) {
                                      Part::Pin,    Part::Shot,  Part::Gear,       Part::Screen, Part::Mic,
                                      Part::Sys,    Part::Check, Part::Open};
     static const Part setOrder[] = {Part::Back,    Part::Pin,        Part::Shot, Part::Gear,   Part::OutDir, Part::OutChange,
-                                    Part::ShotDir, Part::ShotChange, Part::Logs, Part::Github, Part::Site};
-    const Part* order = g.settings ? setOrder : mainOrder;
-    const int n = g.settings ? 11 : 13;
+                                    Part::ShotDir, Part::ShotChange, Part::Logs, Part::Github, Part::Site,     Part::About};
+    static const Part updOrder[] = {Part::Back,     Part::Pin,    Part::Shot,     Part::Gear,
+                                    Part::UpdNotes, Part::UpdNow, Part::UpdLater, Part::UpdSkip};
+    const Part* order = g.view == View::Settings ? setOrder : g.view == View::Update ? updOrder : mainOrder;
+    const int n = g.view == View::Settings ? 12 : g.view == View::Update ? 8 : 13;
     int i = 0;
     while (i < n && order[i] != g.focus) ++i;
     for (int step = 0; step < n; ++step) {
@@ -1679,16 +2003,20 @@ void moveFocus(int dir) {
 }
 
 Part enabledHit(LPARAM lp) {
-    const Part p = hitTest(dip(static_cast<short>(LOWORD(lp))), dip(static_cast<short>(HIWORD(lp))), g.settings);
+    const Part p = hitTest(dip(static_cast<short>(LOWORD(lp))), dip(static_cast<short>(HIWORD(lp))), g.view);
     return enabled(p) ? p : Part::None;
 }
 
-void registerHotkey() {
-    UINT mods = 0, vk = 0;
+void unregisterHotkeys() {
     if (g.hotkeyOn) UnregisterHotKey(g.hwnd, kHotkey);
     if (g.shotHotkeyOn) UnregisterHotKey(g.hwnd, kHotkeyShot);
     if (g.audioHotkeyOn) UnregisterHotKey(g.hwnd, kHotkeyAudio);
     g.hotkeyOn = g.shotHotkeyOn = g.audioHotkeyOn = false;
+}
+
+void registerHotkey() {
+    UINT mods = 0, vk = 0;
+    unregisterHotkeys();
     if (parseHotkey(g.cfg.audioHotkey, &mods, &vk)) {
         g.audioHotkeyOn = RegisterHotKey(g.hwnd, kHotkeyAudio, mods | MOD_NOREPEAT, vk) != 0;
         Log::event("ui.hotkey", g.audioHotkeyOn, -1,
@@ -1717,14 +2045,15 @@ void addSystemMenu() {
 
 // ---- tooltips: the tools that are only an icon, and the guide's name
 constexpr UINT_PTR kTipGuide = 100;
-const Part kTipParts[] = {Part::Record,  Part::Audio,      Part::Pin,     Part::Shot,       Part::Gear,
-                          Part::Pause,   Part::AudioPause, Part::AudioFormat, Part::Back,   Part::OutDir,
-                          Part::OutChange, Part::ShotDir,  Part::ShotChange, Part::Logs,    Part::Github,
-                          Part::Site};
+const Part kTipParts[] = {Part::Record,    Part::Audio,   Part::Pin,        Part::Shot,       Part::Gear,
+                          Part::Pause,     Part::AudioPause, Part::AudioFormat, Part::Back,    Part::OutDir,
+                          Part::OutChange, Part::ShotDir, Part::ShotChange, Part::Logs,       Part::Github,
+                          Part::Site,      Part::About,   Part::UpdNotes,   Part::UpdNow,     Part::UpdLater,
+                          Part::UpdSkip};
 
 // A tool of the other view has no room (moveTooltips when the view changes), so their rectangles never compete.
 RECT tipRect(UINT_PTR id) {
-    if (id != kTipGuide && !inView(static_cast<Part>(id), g.settings)) return {0, 0, 0, 0};
+    if (id != kTipGuide && !inView(static_cast<Part>(id), g.view)) return {0, 0, 0, 0};
     const D2D1_RECT_F f = id == kTipGuide ? guideRect() : partRect(static_cast<Part>(id));
     return {S(static_cast<int>(f.left)), S(static_cast<int>(f.top)), S(static_cast<int>(f.right)), S(static_cast<int>(f.bottom))};
 }
@@ -1740,8 +2069,20 @@ std::wstring tipText(UINT_PTR id) {
             return g.recording && g.recAudio ? L"録音を止めて保存 (" + aud + L")" : L"録音だけ: マイクと PC の音声 (" + aud + L")";
         case Part::Pin: return g.topmost ? L"最前面の固定をやめる" : L"最前面に固定する";
         case Part::Shot: return L"スクショ (" + shot + L") — Rec Cue! の窓は写りません";
-        case Part::Gear: return g.settings ? L"設定を閉じる" : L"設定 — 保存先・ショートカットキー・ログ・リンク";
-        case Part::Back: return L"戻る (Esc)";
+        case Part::Gear:
+            if (g.view == View::Settings) return L"設定を閉じる";
+            return g.updOffered ? L"設定 — 新しい版 " + g.upd.latest.version + L" があります"
+                                : L"設定 — 保存先・ショートカットキー・ログ・リンク";
+        case Part::Back: return g.view == View::Update ? L"あとで (Esc)" : L"戻る (Esc)";
+        case Part::About: return g.updOffered ? L"新しい版 " + g.upd.latest.version + L" の内容と更新" : L"";
+        case Part::UpdNotes: return g.upd.latest.page;
+        case Part::UpdNow:
+            if (g.updFailed) return L"GitHub の Releases のページを開きます (rec-cue.exe を置き換えてください)";
+            if (!enabled(Part::UpdNow)) return g.updBusy ? L"" : L"録画中・録音中は更新できません";
+            return L"rec-cue.exe を受け取り、大きさと SHA-256 を確かめてから入れ替えて開き直します (今の版は "
+                   L"rec-cue.prev.exe に残ります)";
+        case Part::UpdLater: return L"次に開いたときに、またお知らせします";
+        case Part::UpdSkip: return L"この版はお知らせしません (次の版が出たらお知らせします)";
         case Part::OutDir:
         case Part::ShotDir: return L"エクスプローラーで開く";
         case Part::OutChange:
@@ -1963,7 +2304,7 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     line(apaused, Scene::Pause, ca);
     shot(L"audio-paused", apaused);
     UiModel set = idle;   // the settings view (the gear): the save folders, the shortcuts, the log and the links
-    set.settings = true;
+    set.view = View::Settings;
     set.outDir = dir;
     set.keys[0] = {L"Ctrl+Alt+R", false};
     set.keys[1] = {L"Ctrl+Alt+A", false};
@@ -1978,6 +2319,41 @@ int runSnapshot(const std::wstring& path, UINT dpiArg, const std::wstring& at) {
     setRec.comment = rec.comment;
     setRec.commentTone = rec.commentTone;
     shot(L"settings-rec", setRec);
+    // the update view as it opens when a newer release is found, while 今すぐ更新 downloads, after a failure, and the
+    // settings with that release on the version row and a dot on the gear (a sample release, not GitHub's)
+    UiModel upd = idle;
+    upd.view = View::Update;
+    upd.newVersion = upd.update.version = L"0.6.0";
+    upd.update.current = wide(kVersion);
+    upd.update.published = L"2026-11-14";
+    upd.update.size = 1317376;
+    upd.update.notes = {L"アップデートの通知\t窓を開いたときに新しい版を確かめ、今すぐ更新・あとで・この版をスキップから選べます",
+                        L"今すぐ更新\trec-cue.exe を受け取り、大きさと SHA-256 を確かめてから入れ替えて開き直します",
+                        L"この版をスキップ\tその版はお知らせしません。次の版が出たらお知らせします",
+                        L"設定の画面\t新しい版があるときは、版の欄から開けます",
+                        L"\tしおりの台詞を新しい画面に合わせました",
+                        L"exe のプロパティ\t版が正しく出るようにしました",
+                        L"\t細かな直し"};
+    upd.focus = Part::UpdNow;
+    upd.comment = withVersion(kUpdOffer, L"0.6.0");
+    upd.commentTone = UiModel::Tone::Normal;
+    shot(L"update", upd);
+    UiModel updBusy = upd;
+    updBusy.update.state = UiModel::Update::State::Download;
+    updBusy.update.got = upd.update.size * 2 / 5;
+    updBusy.focus = Part::Back;
+    updBusy.comment = kUpdGetting;
+    shot(L"update-busy", updBusy);
+    UiModel updFail = upd;
+    updFail.update.state = UiModel::Update::State::Failed;
+    updFail.update.error = L"受け取れませんでした";
+    updFail.comment = kUpdFailed;
+    updFail.commentTone = UiModel::Tone::Bad;
+    shot(L"update-failed", updFail);
+    UiModel setUpd = set;
+    setUpd.newVersion = upd.newVersion;
+    setUpd.hot = Part::About;
+    shot(L"settings-update", setUpd);
     // the buttons under the taskbar thumbnail, 4x the 16 px they are at 100%, for the dark and the light taskbar
     const std::pair<ThumbGlyph, const wchar_t*> glyphs[] = {{ThumbGlyph::Record, L"record"}, {ThumbGlyph::Audio, L"audio"},
                                                             {ThumbGlyph::Pause, L"pause"},   {ThumbGlyph::Resume, L"resume"},
@@ -2024,6 +2400,12 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             addTooltips();
             g.status = idleStatus();
             say(Scene::Start);
+            g.updatedFrom = takeUpdatedNote();
+            if (!g.updatedFrom.empty()) {   // opened by 今すぐ更新 of the version before
+                Log::event("update.done", true, -1, u8(g.updatedFrom) + " -> " + kVersion);
+                passText(withVersion(kUpdDone, wide(kVersion)), 8000, UiModel::Tone::Good);
+            }
+            startUpdateCheck();
             return 0;
         case WM_NOTIFY: {
             const auto* nm = reinterpret_cast<const NMHDR*>(lp);
@@ -2114,8 +2496,8 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 moveFocus(GetKeyState(VK_SHIFT) < 0 ? -1 : 1);
                 return 0;
             }
-            if (wp == VK_ESCAPE && g.settings) {
-                showSettings(false);
+            if (wp == VK_ESCAPE && g.view != View::Main) {   // あとで in the update view (not while it updates)
+                activate(Part::Back);
                 return 0;
             }
             if (wp == VK_SPACE || wp == VK_RETURN ||
@@ -2148,6 +2530,7 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 KillTimer(h, kTimerFlash);
                 invalidate();
             }
+            if (wp == kTimerUpdate) invalidate();   // 今すぐ更新's progress
             if (wp == kTimerResume) {   // ▶ under the taskbar thumbnail, 0.3 s ago (still paused and not stopping)
                 KillTimer(h, kTimerResume);
                 if (g.recording && !g.stopping && g.rec.paused()) togglePause();
@@ -2161,6 +2544,12 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_APP_LOGS:
             onLogsPacked();
+            return 0;
+        case WM_APP_UPDATE:
+            onUpdateChecked();
+            return 0;
+        case WM_APP_INSTALLED:
+            onUpdateInstalled();
             return 0;
         case WM_DPICHANGED: {
             g.dpi = HIWORD(wp);
@@ -2223,6 +2612,7 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(h, kTimerSplit);
             KillTimer(h, kTimerSay);
             KillTimer(h, kTimerResume);
+            KillTimer(h, kTimerUpdate);
             g.ind.shutdown();
             g.thumb.shutdown();
             g.painter.dropTarget();
@@ -2244,7 +2634,8 @@ int quitRunning(const std::wstring& jsonOut) {
         wchar_t t[128]{};
         GetWindowTextW(w, t, 128);
         const std::wstring title(t);
-        if (title.find(L"録画中") != std::wstring::npos || title.find(L"録音中") != std::wstring::npos) {   // also while starting / saving
+        if (title.find(L"録画中") != std::wstring::npos || title.find(L"録音中") != std::wstring::npos ||   // also while starting / saving
+            title.find(L"更新中") != std::wstring::npos) {   // ... and while 今すぐ更新 replaces the exe
             result = "recording";
             code = 3;
         } else {
@@ -2263,15 +2654,16 @@ int quitRunning(const std::wstring& jsonOut) {
     return code;
 }
 
-int runUi(HINSTANCE inst, int show) {
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\RecCue.Window");
+int runUi(HINSTANCE inst, int show, const Args& a) {
+    if (!a.pretend.empty()) g.version = a.pretend;
+    g.mutex = CreateMutexW(nullptr, TRUE, L"Local\\RecCue.Window");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND other = FindWindowW(kClass, nullptr);
         if (other) {
             ShowWindow(other, SW_RESTORE);
             SetForegroundWindow(other);
         }
-        if (mutex) CloseHandle(mutex);
+        if (g.mutex) CloseHandle(g.mutex);
         return 0;
     }
     std::vector<std::string> warn;
@@ -2286,7 +2678,7 @@ int runUi(HINSTANCE inst, int show) {
     if (!g.painter.init()) {
         Log::event("ui.init", false, -1, "Direct2D / DirectWrite unavailable");
         MessageBoxW(nullptr, L"画面の描画 (Direct2D) を初期化できませんでした。", kTitle, MB_ICONERROR | MB_OK);
-        if (mutex) CloseHandle(mutex);
+        if (g.mutex) CloseHandle(g.mutex);
         return 1;
     }
     WNDCLASSEXW wc{};
@@ -2314,13 +2706,14 @@ int runUi(HINSTANCE inst, int show) {
     }
     if (g.stopper.joinable()) g.stopper.join();
     if (g.rec.active()) g.rec.stop();
-    if (!waitShooter(3000) || !waitPacker(3000)) {
+    if (!waitShooter(3000) || !waitPacker(3000) || !waitWorker(g.updater, g.updDone, 10000, "the update") ||
+        !waitWorker(g.checker, g.checkDone, 300, "the update check")) {
         // A worker is stuck in file I/O: end the process here (ExitProcess stops that thread first and runs no
         // destructors that it could still touch), so nothing stays behind without a window.
-        if (mutex) CloseHandle(mutex);
+        if (g.mutex) CloseHandle(g.mutex);
         ExitProcess(0);
     }
-    if (mutex) CloseHandle(mutex);
+    if (g.mutex) CloseHandle(g.mutex);
     g.painter = UiPainter{};   // release WIC / Direct2D before COM is uninitialized
     return 0;
 }
@@ -2336,7 +2729,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     int code = !a.snapshot.empty() ? runSnapshot(a.snapshot, static_cast<UINT>(std::max(0, a.dpi)), a.at)
                : a.quit            ? quitRunning(a.jsonOut)
                : a.any             ? runCli(a)
-                                   : runUi(inst, show);
+                                   : runUi(inst, show, a);
     if (SUCCEEDED(mf)) MFShutdown();
     CoUninitialize();
     return code;

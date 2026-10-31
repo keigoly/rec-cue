@@ -84,13 +84,26 @@ constexpr D2D1_RECT_F kLogsBox{kL, 214, 154, 244};
 constexpr D2D1_RECT_F kGithubBox{160, 214, 276, 244};
 constexpr D2D1_RECT_F kSiteBox{282, 214, 396, 244};
 constexpr D2D1_RECT_F kAboutBox{kL, 254, 396, 278};    // the version (what 「Rec Cue! について」 used to show)
+// the update view (a newer release on GitHub): the same header with ← and アップデート, the release and when it came
+// out, a line per change, the download's progress, and OBS's three choices
+constexpr float kSecNew = 44;                           // 新しい版
+constexpr D2D1_RECT_F kNewBox{kL, 62, 392, 90};
+constexpr D2D1_RECT_F kNotesLinkBox{398, 62, kR, 90};   // 詳しく: the release's page
+constexpr float kSecNotes = 98;                         // 変更点
+constexpr D2D1_RECT_F kNotesBox{kL, 116, kR, 236};      // six lines, above her head
+constexpr float kNoteH = 18;
+constexpr D2D1_RECT_F kUpdBarBox{kL, 242, 396, 260};    // the size before, the progress during, why after a failure
+constexpr D2D1_RECT_F kUpdNowBox{kL, 266, 146, 296};
+constexpr D2D1_RECT_F kUpdLaterBox{152, 266, 248, 296};
+constexpr D2D1_RECT_F kUpdSkipBox{254, 266, 396, 296};
 
 // Segoe Fluent Icons / Segoe MDL2 Assets
 constexpr wchar_t kIconMic = 0xE720, kIconSpeakers = 0xE767, kIconPulse = 0xE9D9, kIconStop = 0xE71A,
                   kIconFolderOpen = 0xE838, kIconSettings = 0xE713, kIconChevron = 0xE70D, kIconFolder = 0xE8B7,
                   kIconPin = 0xE718, kIconPinFill = 0xE842, kIconCamera = 0xE722, kIconWarn = 0xE7BA,
                   kIconCheck = 0xE73E, kIconMonitor = 0xE7F4, kIconBack = 0xE72B, kIconVideo = 0xE714,
-                  kIconKeyboard = 0xE765, kIconDownload = 0xE896, kIconOpenIn = 0xE8A7, kIconInfo = 0xE946;
+                  kIconKeyboard = 0xE765, kIconDownload = 0xE896, kIconOpenIn = 0xE8A7, kIconInfo = 0xE946,
+                  kIconSync = 0xE895, kIconChevronRight = 0xE76C;
 
 D2D1_RECT_F inset(const D2D1_RECT_F& r, float d) { return {r.left + d, r.top + d, r.right - d, r.bottom - d}; }
 D2D1_RECT_F fieldRect(float y) { return {kFieldL, y, kFieldR, y + kRowH}; }
@@ -111,8 +124,20 @@ bool hasExtension(const std::wstring& p) {
     return dot != std::wstring::npos && (sep == std::wstring::npos || dot > sep);
 }
 
-// The part can be pressed now (ログを取得 waits while it packs the files).
-bool usable(const UiModel& m, Part p) { return partEnabled(m.phase, m.audioOnly, p) && !(p == Part::Logs && m.logsBusy); }
+std::wstring megabytes(uint64_t bytes) {
+    wchar_t b[24];
+    swprintf(b, 24, L"%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    return b;
+}
+
+// The part can be pressed now (ログを取得 waits while it packs the files; the update view's choices and ← while
+// 今すぐ更新 is under way; the version row only opens a release that is offered).
+bool usable(const UiModel& m, Part p) {
+    const bool choice = p == Part::UpdNow || p == Part::UpdLater || p == Part::UpdSkip ||
+                        (p == Part::Back && m.view == View::Update);
+    return partEnabled(m.phase, m.audioOnly, p) && !(p == Part::Logs && m.logsBusy) && !(choice && m.busy()) &&
+           !(p == Part::About && m.newVersion.empty());
+}
 
 }  // namespace
 
@@ -140,6 +165,11 @@ D2D1_RECT_F partRect(Part p) {
         case Part::Logs: return kLogsBox;
         case Part::Github: return kGithubBox;
         case Part::Site: return kSiteBox;
+        case Part::About: return kAboutBox;
+        case Part::UpdNotes: return kNotesLinkBox;
+        case Part::UpdNow: return kUpdNowBox;
+        case Part::UpdLater: return kUpdLaterBox;
+        case Part::UpdSkip: return kUpdSkipBox;
         case Part::None: break;
     }
     return {0, 0, 0, 0};
@@ -147,30 +177,42 @@ D2D1_RECT_F partRect(Part p) {
 
 D2D1_RECT_F guideRect() { return kGuideBox; }
 
-bool inView(Part p, bool settings) {
+bool inView(Part p, View v) {
     switch (p) {
         case Part::Pin:
         case Part::Shot:
         case Part::Gear:
         case Part::Guide: return true;
-        case Part::Back:
+        case Part::Back: return v != View::Main;
         case Part::OutDir:
         case Part::OutChange:
         case Part::ShotDir:
         case Part::ShotChange:
         case Part::Logs:
         case Part::Github:
-        case Part::Site: return settings;
+        case Part::Site:
+        case Part::About: return v == View::Settings;
+        case Part::UpdNotes:
+        case Part::UpdNow:
+        case Part::UpdLater:
+        case Part::UpdSkip: return v == View::Update;
         case Part::None: return false;
-        default: return !settings;
+        default: return v == View::Main;
     }
 }
 
-Part hitTest(float x, float y, bool settings) {
+Part hitTest(float x, float y, View v) {
     auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
-    if (settings) {
+    if (v == View::Update) {
+        for (Part p : {Part::Back, Part::Pin, Part::Shot, Part::Gear, Part::UpdNotes, Part::UpdNow, Part::UpdLater,
+                       Part::UpdSkip})
+            if (in(partRect(p))) return p;
+        if (in(kGuideBox) || in(kBubble)) return Part::Guide;
+        return Part::None;
+    }
+    if (v == View::Settings) {
         for (Part p : {Part::Back, Part::Pin, Part::Shot, Part::Gear, Part::OutChange, Part::ShotChange, Part::Logs,
-                       Part::Github, Part::Site})
+                       Part::Github, Part::Site, Part::About})
             if (in(partRect(p))) return p;
         if (in({kL, kOutY, kDirR, kOutY + kRowH})) return Part::OutDir;
         if (in({kL, kShotDirY, kDirR, kShotDirY + kRowH})) return Part::ShotDir;
@@ -203,6 +245,7 @@ bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p) {
         case Part::AudioFormat:
         case Part::OutChange:
         case Part::ShotChange:
+        case Part::UpdNow:
         case Part::Check: return ph == P::Idle || ph == P::Checking;
         case Part::Pin:
         case Part::Shot:
@@ -213,6 +256,10 @@ bool partEnabled(UiModel::Phase ph, bool audioOnly, Part p) {
         case Part::Logs:
         case Part::Github:
         case Part::Site:
+        case Part::About:
+        case Part::UpdNotes:
+        case Part::UpdLater:
+        case Part::UpdSkip:
         case Part::Open: return true;
         case Part::Guide: return ph != P::Starting && ph != P::Saving;
         case Part::Pause: return ph == P::Recording && !audioOnly;
@@ -613,15 +660,19 @@ void UiPainter::draw(ID2D1RenderTarget* rt, const UiModel& m) {
         return;
     const bool rec = m.phase == P::Recording;
 
-    // header: the name (in the settings view ← and 設定), then three icon tools on the right (pin, screenshot, settings)
+    // header: the name (in the settings and update views ← and their title), then three icon tools on the right
+    // (pin, screenshot, settings)
     b->SetColor(C(kText));
-    if (m.settings) {
+    if (m.view != View::Main) {
         drawIconButton(rt, b.get(), m, Part::Back, kIconBack, Look::Plain, 0);
         b->SetColor(C(kText));
-        text(rt, b.get(), L"設定", brand_.get(), kSetTitleBox, 0.2f);
+        float tw = 0;
+        text(rt, b.get(), m.view == View::Update ? L"アップデート" : L"設定", brand_.get(),
+             {kSetTitleBox.left, kSetTitleBox.top, 200, kSetTitleBox.bottom}, 0.2f, &tw);
         if (rec) {   // a recording goes on meanwhile: its chip and its time beside the title
-            drawChip(rt, b.get(), m, kSetChipX, kSetChipY, m.audioOnly);
-            const float x = kSetChipX + (m.paused || m.audioOnly ? 66.f : 52.f) + 8;
+            const float chipX = std::max(kSetChipX, std::round(kSetTitleBox.left + tw + 8));
+            drawChip(rt, b.get(), m, chipX, kSetChipY, m.audioOnly);
+            const float x = chipX + (m.paused || m.audioOnly ? 66.f : 52.f) + 8;
             b->SetColor(C(m.paused ? kText3 : kText2));
             text(rt, b.get(), m.timer, path_.get(), {x, 8, x + 70, 36});
         }
@@ -630,10 +681,19 @@ void UiPainter::draw(ID2D1RenderTarget* rt, const UiModel& m) {
     }
     drawIconButton(rt, b.get(), m, Part::Pin, m.topmost ? kIconPinFill : kIconPin, m.topmost ? Look::Accent : Look::Plain, 0);
     drawIconButton(rt, b.get(), m, Part::Shot, kIconCamera, m.shotFlash ? Look::Flash : Look::Plain, rec ? m.shots : 0);
-    drawIconButton(rt, b.get(), m, Part::Gear, kIconSettings, m.settings ? Look::Accent : Look::Plain, 0);
+    drawIconButton(rt, b.get(), m, Part::Gear, kIconSettings, m.view == View::Settings ? Look::Accent : Look::Plain, 0);
+    if (!m.newVersion.empty() && m.view != View::Update) {   // a newer release waits behind the gear
+        const D2D1_POINT_2F c{kGearBox.right - 5, kGearBox.top + 5};
+        b->SetColor(C(kCanvas));
+        rt->FillEllipse(D2D1::Ellipse(c, 4.5f, 4.5f), b.get());
+        b->SetColor(C(kCyan));
+        rt->FillEllipse(D2D1::Ellipse(c, 3.f, 3.f), b.get());
+    }
 
-    if (m.settings) {
+    if (m.view == View::Settings) {
         drawSettings(rt, b.get(), m);
+    } else if (m.view == View::Update) {
+        drawUpdate(rt, b.get(), fx.get(), m);
     } else {
         drawDeck(rt, b.get(), m);
         drawScreen(rt, b.get(), fx.get(), m);
@@ -658,7 +718,7 @@ void UiPainter::draw(ID2D1RenderTarget* rt, const UiModel& m) {
 void UiPainter::drawIconButton(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m, Part p, wchar_t icon,
                                Look look, int counter) {
     const D2D1_RECT_F r = partRect(p);
-    const bool en = partEnabled(m.phase, m.audioOnly, p), hot = en && m.hot == p, down = hot && m.pressed == p;
+    const bool en = usable(m, p), hot = en && m.hot == p, down = hot && m.pressed == p;
     UINT32 fill = kControl, border = kControlBorder, edge = kEdge, ic = kFieldText;
     if (!en) {
         fill = kOffFill, border = kOffBorder, edge = 0, ic = kOffText;
@@ -1201,7 +1261,7 @@ void UiPainter::drawSettings(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, con
     drawButton(rt, b, m, Part::Logs, kIconDownload, m.logsBusy ? L"まとめています…" : L"ログを取得", false);
     drawButton(rt, b, m, Part::Github, kIconOpenIn, L"GitHub", false);
     drawButton(rt, b, m, Part::Site, kIconOpenIn, L"公式サイト", false);
-    drawAbout(rt, b);
+    drawAbout(rt, b, m);
 }
 
 // A heading and a hairline to the right edge.
@@ -1261,10 +1321,12 @@ void UiPainter::drawKeys(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const U
     rt->PopAxisAlignedClip();
 }
 
-// What 「Rec Cue! について」 told before the settings view: the version and who guides.
-void UiPainter::drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b) {
+// What 「Rec Cue! について」 told before the settings view: the version and who guides. While a newer release is
+// offered, the row says so on its right and opens the update view.
+void UiPainter::drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, const UiModel& m) {
     const D2D1_RECT_F r = kAboutBox;
-    panel(rt, b, r, 5, kWell, kWellBorder, 0);
+    const bool offer = usable(m, Part::About), hot = offer && m.hot == Part::About, down = hot && m.pressed == Part::About;
+    panel(rt, b, r, 5, down ? kControlDown : hot ? kControlHot : kWell, hot ? kControlBorderHot : kWellBorder, 0);
     b->SetColor(C(kIcon));
     text(rt, b, std::wstring(1, kIconInfo), iconSmall_.get(), {r.left + 7, r.top, r.left + 21, r.bottom});
     float w = 0;
@@ -1272,6 +1334,94 @@ void UiPainter::drawAbout(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b) {
     text(rt, b, L"Rec Cue! " + wide(kVersion), badge_.get(), {r.left + 26, r.top, r.left + 140, r.bottom}, 0, &w);
     b->SetColor(C(kText3));
     text(rt, b, L"案内役 湊 しおり", sub_.get(), {r.left + 26 + w + 10, r.top, r.right - 8, r.bottom});
+    if (offer) {
+        const std::wstring s = m.newVersion + L" に更新できます";
+        const float sw = std::round(textWidth(s, badge_.get()));
+        b->SetColor(C(hot ? kCyanText : kCyan));
+        text(rt, b, s, badge_.get(), {r.right - 22 - sw, r.top, r.right - 20, r.bottom});
+        text(rt, b, std::wstring(1, kIconChevronRight), chevron_.get(), {r.right - 18, r.top, r.right - 6, r.bottom});
+    }
+    if (m.showFocus && m.focus == Part::About) focusRing(rt, b, r, 5);
+}
+
+// The update view: the release offered, a line per change, and OBS's three choices. The line above the buttons gives
+// the size before 今すぐ更新, its progress during, and why after a failure (今すぐ更新 then opens the page instead).
+void UiPainter::drawUpdate(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* b, ID2D1SolidColorBrush* fx, const UiModel& m) {
+    using S = UiModel::Update::State;
+    const UiModel::Update& u = m.update;
+    drawSection(rt, b, L"新しい版", kSecNew);
+    const D2D1_RECT_F n = kNewBox;
+    panel(rt, b, n, 5, kWell, kWellBorder, 0);
+    b->SetColor(C(kCyan));
+    text(rt, b, std::wstring(1, kIconSync), icon_.get(), {n.left + 8, n.top, n.left + 24, n.bottom});
+    float w = 0;
+    b->SetColor(C(kText));
+    text(rt, b, L"Rec Cue! " + u.version, label_.get(), {n.left + 30, n.top, n.left + 180, n.bottom}, 0, &w);
+    std::wstring sub = L"いまの版 " + u.current;
+    if (!u.published.empty()) sub += L" ・ " + u.published + L" 公開";
+    b->SetColor(C(kText3));
+    text(rt, b, sub, sub_.get(), {n.left + 30 + w + 10, n.top, n.right - 8, n.bottom});
+    drawButton(rt, b, m, Part::UpdNotes, 0, L"詳しく", false);
+
+    drawSection(rt, b, L"変更点", kSecNotes);
+    const D2D1_RECT_F box = kNotesBox;
+    panel(rt, b, box, 5, kWell, kWellBorder, 0);
+    const size_t rows = static_cast<size_t>((box.bottom - box.top - 12) / kNoteH);
+    float y = box.top + 6;
+    if (u.notes.empty()) {
+        b->SetColor(C(kText3));
+        text(rt, b, L"変更点は「詳しく」の GitHub のページでご覧いただけます", sub_.get(),
+             {box.left + 12, y, box.right - 10, y + kNoteH});
+    }
+    for (size_t i = 0; i < u.notes.size() && i < rows; ++i, y += kNoteH) {
+        const bool more = i + 1 == rows && u.notes.size() > rows;   // the last row counts the rest
+        const size_t tab = u.notes[i].find(L'\t');
+        const std::wstring title = more || tab == std::wstring::npos ? L"" : u.notes[i].substr(0, tab);
+        const std::wstring rest = tab == std::wstring::npos ? u.notes[i] : u.notes[i].substr(tab + 1);
+        const std::wstring s = more ? L"ほか " + std::to_wstring(u.notes.size() - i) + L" 件 (「詳しく」のページに)"
+                               : title.empty() ? rest : title + L"  " + rest;
+        b->SetColor(C(more ? kText3 : kCyanDeep));
+        text(rt, b, more ? L"…" : L"•", sub_.get(), {box.left + 10, y, box.left + 20, y + kNoteH});
+        const D2D1_RECT_F tr{box.left + 22, y, box.right - 10, y + kNoteH};
+        Com<IDWriteTextLayout> l = layout(s, sub_.get(), tr);
+        if (!l) continue;
+        if (!title.empty()) {
+            const DWRITE_TEXT_RANGE t{0, static_cast<UINT32>(title.size())};
+            fx->SetColor(C(kLabel));
+            l->SetDrawingEffect(fx, t);
+            l->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, t);
+        }
+        b->SetColor(C(more ? kText3 : kText2));
+        rt->DrawTextLayout({tr.left, tr.top}, l.get(), b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    const D2D1_RECT_F bar = kUpdBarBox;
+    if (u.state == S::Failed) {
+        b->SetColor(C(kRosePale));
+        text(rt, b, L"更新できませんでした — " + u.error, sub_.get(), bar);
+    } else if (u.state == S::Offer) {
+        b->SetColor(C(kText3));
+        text(rt, b,
+             L"rec-cue.exe " + megabytes(u.size) + L" ・ 受け取ったら誤りがないか確かめて入れ替え、開き直します",
+             sub_.get(), bar);
+    } else {
+        const std::wstring what = u.state == S::Download ? L"受け取っています  " + megabytes(u.got) + L" / " + megabytes(u.size)
+                                  : u.state == S::Verify ? L"誤りがないか確かめています"
+                                                         : L"入れ替えています";
+        b->SetColor(C(kText2));
+        text(rt, b, what, sub_.get(), {bar.left, bar.top, 216, bar.bottom});
+        const float cy = (bar.top + bar.bottom) / 2, left = 222, right = bar.right;
+        const double p = u.state == S::Download && u.size ? std::min(1.0, static_cast<double>(u.got) / u.size) : 1.0;
+        b->SetColor(C(kMeterTrack));
+        rt->FillRoundedRectangle(D2D1::RoundedRect({left, cy - 2, right, cy + 2}, 2, 2), b);
+        b->SetColor(C(kCyan));
+        rt->FillRoundedRectangle(D2D1::RoundedRect({left, cy - 2, left + static_cast<float>((right - left) * p), cy + 2}, 2, 2), b);
+    }
+    const bool failed = u.state == S::Failed;
+    drawButton(rt, b, m, Part::UpdNow, failed ? kIconOpenIn : kIconDownload,
+               failed ? L"ページを開く" : m.busy() ? L"更新しています…" : L"今すぐ更新", !failed && !m.busy());
+    drawButton(rt, b, m, Part::UpdLater, 0, L"あとで", false);
+    drawButton(rt, b, m, Part::UpdSkip, 0, L"この版をスキップ", false);
 }
 
 // しおり's line under the buttons: a speech bubble whose tail points at her.

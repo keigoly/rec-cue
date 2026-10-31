@@ -62,7 +62,12 @@ static const char* kDefaultIni =
     "\r\n"
     "; 歯車の設定の「GitHub」「公式サイト」で開くページ\r\n"
     "github_url=https://github.com/keigoly/rec-cue\r\n"
-    "site_url=https://official.keigoly.jp/\r\n";
+    "site_url=https://official.keigoly.jp/\r\n"
+    "\r\n"
+    "; 窓を開いたときに GitHub で新しい版を確かめる (1 / 0)。送るのは最新の版を尋ねる問い合わせだけです\r\n"
+    "update_check=1\r\n"
+    "; 「この版をスキップ」を選んだ版 (その版はお知らせしません。次の版が出たらお知らせします)\r\n"
+    "update_skip=\r\n";
 
 std::wstring configPath() { return appDir() + L"\\config.ini"; }
 
@@ -210,6 +215,8 @@ Config loadConfig(std::vector<std::string>* warn) {
             if (!v.empty() && v != L"https://github.com/keigoly") c.githubUrl = v;
         }
         else if (k == L"site_url") { if (!v.empty()) c.siteUrl = v; }
+        else if (k == L"update_check") toBool(c.updateCheck);
+        else if (k == L"update_skip") c.updateSkip = v;
         else if (k == L"shiori_voice") {}   // 0.3.1 tried five voices; she speaks one way now (old files stay quiet)
         else if (warn) warn->push_back("config: unknown key " + u8(k));
     }
