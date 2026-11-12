@@ -19,7 +19,7 @@
 
 namespace rc {
 
-constexpr const char* kVersion = "0.5.1";
+constexpr const char* kVersion = "0.5.2";
 
 // Minimal intrusive COM pointer (no WRL dependency).
 template <class T>
@@ -92,7 +92,21 @@ struct UiCounters {
     std::atomic<uint64_t> resizes{0};    // WM_SIZE (minimize / restore)
     std::atomic<uint64_t> targets{0};    // Direct2D window targets created
     std::atomic<uint64_t> overlays{0};   // taskbar overlay icon changes
+    // 2026-11-12 (Step 1, counted only): GPU memory grows by one client area per paint in some recordings and
+    // comes back when the window is used again — is the window hidden behind other windows in those?
+    std::atomic<uint64_t> occludedPaints{0};   // paints while Direct2D said the window was occluded
+    std::atomic<uint64_t> drawFails{0};        // EndDraw did not return S_OK
+    std::atomic<uint64_t> skippedPaints{0};    // WM_PAINT not drawn because the window was minimized
+    std::atomic<uint64_t> coveredTicks{0};     // 100 ms ticks with another window over all 5 sample points
+    std::atomic<uint64_t> partTicks{0};        //   ... over 1 to 4 of them
+    std::atomic<uint64_t> iconicTicks{0};      //   ... minimized
+    std::atomic<uint64_t> cloakedTicks{0};     //   ... cloaked (another virtual desktop)
+    std::atomic<uint64_t> frontTicks{0};       //   ... the foreground window
+    std::atomic<bool> occluded{false};         // what Direct2D said at the last paint
+    std::atomic<uint32_t> window{0};           // the last tick: kWin* bits, covered points << 8, DWMWA_CLOAKED << 16
+    std::atomic<uint32_t> targetPx{0};         // the Direct2D target: width << 16 | height
 };
+constexpr uint32_t kWinOccluded = 1, kWinIconic = 2, kWinVisible = 4, kWinFront = 8, kWinTopmost = 16;
 UiCounters& uiCounters();
 
 // ---- log ----------------------------------------------------------------

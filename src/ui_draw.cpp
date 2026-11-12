@@ -409,9 +409,17 @@ void UiPainter::paint(HWND h, UINT dpi, const UiModel& m) {
     }
     dpi_ = dpi;
     loadGuides(target_.get(), dpi);
+    // Step 1 (2026-11-12): counted only, the drawing is the same whether the window is occluded or not.
+    const bool occluded = (target_->CheckWindowState() & D2D1_WINDOW_STATE_OCCLUDED) != 0;
+    uiCounters().occluded = occluded;
+    if (occluded) uiCounters().occludedPaints++;
+    const D2D1_SIZE_U px = target_->GetPixelSize();
+    uiCounters().targetPx = px.width << 16 | (px.height & 0xFFFF);
     target_->BeginDraw();
     draw(target_.get(), m);
-    if (target_->EndDraw() == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
+    const HRESULT hr = target_->EndDraw();
+    if (hr != S_OK) uiCounters().drawFails++;
+    if (hr == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
         dropTarget();
         InvalidateRect(h, nullptr, FALSE);
     }

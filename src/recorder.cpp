@@ -124,10 +124,19 @@ std::string memoryJson(IDXGIAdapter3* gpu) {
 // The window's counters (zero with --record).
 std::string uiJson() {
     const UiCounters& u = uiCounters();
-    return fmt(",\"ui\":{\"paints\":%llu,\"ticks\":%llu,\"resizes\":%llu,\"targets\":%llu,\"overlays\":%llu}",
-               static_cast<unsigned long long>(u.paints.load()), static_cast<unsigned long long>(u.ticks.load()),
-               static_cast<unsigned long long>(u.resizes.load()), static_cast<unsigned long long>(u.targets.load()),
-               static_cast<unsigned long long>(u.overlays.load()));
+    const auto n = [](const std::atomic<uint64_t>& v) { return static_cast<unsigned long long>(v.load()); };
+    const uint32_t w = u.window.load(), px = u.targetPx.load();
+    return fmt(",\"ui\":{\"paints\":%llu,\"ticks\":%llu,\"resizes\":%llu,\"targets\":%llu,\"overlays\":%llu", n(u.paints),
+               n(u.ticks), n(u.resizes), n(u.targets), n(u.overlays)) +
+           // 2026-11-12 (Step 1): was the window hidden while the GPU memory grew? Counts since the window opened.
+           fmt(",\"occl_paints\":%llu,\"draw_fails\":%llu,\"skipped_paints\":%llu,\"covered_ticks\":%llu,\"part_ticks\":%llu,\"iconic_ticks\":%llu,"
+               "\"cloaked_ticks\":%llu,\"front_ticks\":%llu",
+               n(u.occludedPaints), n(u.drawFails), n(u.skippedPaints), n(u.coveredTicks), n(u.partTicks), n(u.iconicTicks), n(u.cloakedTicks),
+               n(u.frontTicks)) +
+           fmt(",\"win\":{\"occluded\":%d,\"covered\":%u,\"iconic\":%d,\"visible\":%d,\"cloaked\":%u,\"front\":%d,"
+               "\"topmost\":%d},\"px\":[%u,%u]}",
+               w & kWinOccluded ? 1 : 0, w >> 8 & 0xFF, w & kWinIconic ? 1 : 0, w & kWinVisible ? 1 : 0, w >> 16 & 0xFF,
+               w & kWinFront ? 1 : 0, w & kWinTopmost ? 1 : 0, px >> 16, px & 0xFFFF);
 }
 
 }  // namespace

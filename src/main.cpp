@@ -547,6 +547,7 @@ struct App {
     std::vector<MonitorInfo> monitors;   // for the screen row (refreshed when the menu opens and the displays change)
     int recMonitor = 0;                  // the monitor of the recording being started, made or saved
     bool hotkeyOn = false, shotHotkeyOn = false, audioHotkeyOn = false, topmost = false;
+    uint32_t windowKey = ~0u;   // what watchWindow() last wrote to the log
     Indicators ind;             // taskbar dot and screen-corner dot while recording
     ThumbBar thumb;             // record / audio / pause / stop under the taskbar thumbnail
     bool thumbIcons = false;    // ... and whether its icons have been drawn
@@ -1277,8 +1278,56 @@ void onStopped() {
     g.path = p;
 }
 
+// Step 1 (2026-11-12): in some recordings GPU memory grows by one client area (about 1 MB) per paint and comes
+// back when the window is used again. Nothing is changed here: every 100 ms tick counts what the window looked
+// like (minimized, behind other windows, on another desktop, in front) so that the 10 s stats line can be put
+// next to mem.gpu_local_mb, and a line is written when that changes.
+void watchWindow() {
+    UiCounters& u = uiCounters();
+    const bool iconic = IsIconic(g.hwnd) != 0;
+    const bool visible = IsWindowVisible(g.hwnd) != 0;
+    const bool front = GetForegroundWindow() == g.hwnd;
+    const bool occluded = u.occluded.load();
+    DWORD cloaked = 0;
+    DwmGetWindowAttribute(g.hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    // Another window on top: the centre and the four corners (8 px in) of the client area.
+    int covered = 5;
+    RECT rc;
+    if (!iconic && visible && GetClientRect(g.hwnd, &rc) && rc.right > 16 && rc.bottom > 16) {
+        const POINT at[5] = {{rc.right / 2, rc.bottom / 2},
+                             {8, 8},
+                             {rc.right - 8, 8},
+                             {8, rc.bottom - 8},
+                             {rc.right - 8, rc.bottom - 8}};
+        for (POINT p : at) {
+            ClientToScreen(g.hwnd, &p);
+            const HWND w = WindowFromPoint(p);
+            if (w && (w == g.tip || GetAncestor(w, GA_ROOT) == g.hwnd)) covered--;
+        }
+    }
+    if (covered == 5) u.coveredTicks++;
+    else if (covered > 0) u.partTicks++;
+    if (iconic) u.iconicTicks++;
+    if (cloaked) u.cloakedTicks++;
+    if (front) u.frontTicks++;
+    u.window = (occluded ? kWinOccluded : 0) | (iconic ? kWinIconic : 0) | (visible ? kWinVisible : 0) |
+               (front ? kWinFront : 0) | (g.topmost ? kWinTopmost : 0) | static_cast<uint32_t>(covered) << 8 |
+               (cloaked & 0xFF) << 16;
+    // The line: not for the foreground or a partly covered window (they change all the time).
+    const uint32_t key = (occluded ? 1u : 0u) | (iconic ? 2u : 0u) | (visible ? 4u : 0u) | (covered == 5 ? 8u : 0u) |
+                         (cloaked ? 16u : 0u);
+    if (key != g.windowKey) {
+        g.windowKey = key;
+        Log::event("ui.window", true, -1,
+                   fmt("occluded=%d covered=%d/5 iconic=%d visible=%d cloaked=%lu front=%d topmost=%d", occluded ? 1 : 0,
+                       covered, iconic ? 1 : 0, visible ? 1 : 0, static_cast<unsigned long>(cloaked), front ? 1 : 0,
+                       g.topmost ? 1 : 0));
+    }
+}
+
 void tick() {
     uiCounters().ticks++;
+    watchWindow();
     if (g.recording && !g.stopping) {
         const int t = static_cast<int>(g.rec.elapsedSec());
         wchar_t b[32];
@@ -2429,15 +2478,24 @@ LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_SIZE:
             uiCounters().resizes++;
+            if (wp == SIZE_MINIMIZED) return 0;   // 0 x 0: the target keeps its size, nothing is drawn until it is back
             g.painter.resize(LOWORD(lp), HIWORD(lp));
+            InvalidateRect(h, nullptr, FALSE);
             return 0;
         case WM_ERASEBKGND:
             return 1;   // the painter fills everything
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(h, &ps);
-            uiCounters().paints++;
-            g.painter.paint(h, g.dpi, model());
+            // A minimized window still gets WM_PAINT from the 100 ms tick, and every frame presented to it
+            // stayed in GPU memory until the window was restored (2026-11-12: 60 s minimized = +351 MB, a
+            // 9 minute meeting = 4 GB and a PC out of memory). Nobody sees it, so it is not drawn.
+            if (IsIconic(h)) {
+                uiCounters().skippedPaints++;
+            } else {
+                uiCounters().paints++;
+                g.painter.paint(h, g.dpi, model());
+            }
             EndPaint(h, &ps);
             return 0;
         }
